@@ -47,7 +47,7 @@ def _append(temp_f, humidity, state, outdoor_temp=None):
         try:
             if os.stat(_LOG_FILE)[6] > 55000:
                 _trim()
-        except:
+        except Exception:
             pass
     except Exception as e:
         print('[DataMgr] log error:', e)

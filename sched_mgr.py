@@ -59,7 +59,7 @@ def _time_to_mins(t_str):
     try:
         h, m = t_str.split(':')
         return int(h) * 60 + int(m)
-    except:
+    except Exception:
         return 0
 
 

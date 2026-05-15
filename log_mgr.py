@@ -18,7 +18,7 @@ def _log_print(*args, **kwargs):
             f.write(line)
         if os.stat(_LOG_FILE)[6] > _MAX_BYTES:
             _trim()
-    except:
+    except Exception:
         pass
 
 
@@ -42,7 +42,7 @@ def _trim():
                     dst.write(line)
         os.remove(_LOG_FILE)
         os.rename(_TMP, _LOG_FILE)
-    except:
+    except Exception:
         pass
 
 
