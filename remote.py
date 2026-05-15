@@ -19,6 +19,8 @@ import time
 HOST     = '192.168.x.x'
 PORT     = 8266
 PASSWORD = os.environ.get('WEBREPL_PASSWORD')
+if not PASSWORD:
+    raise EnvironmentError('WEBREPL_PASSWORD environment variable is not set')
 WS_URL   = 'ws://{}:{}/'.format(HOST, PORT)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
