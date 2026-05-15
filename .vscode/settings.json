@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "/home/isaiah/Documents/ThermoStat/.venv/bin/python",
+    "python.terminal.activateEnvInSelectedTerminal": true
+}

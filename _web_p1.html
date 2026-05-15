@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Daikin Smart Control</title>
+<style>
+:root{
+  --bg:#0f0f0f;--card:#1a1a1a;--card2:#222;--accent:#00BFFF;
+  --cool:#00BFFF;--heat:#FF6B35;--fan:#32CD32;
+  --text:#e0e0e0;--sub:#777;--save:#27ae60;--del:#c0392b;
+  --r:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:30px}
+.wrap{max-width:500px;margin:0 auto;padding:14px}
+.hdr{text-align:center;padding:10px 0 14px}
+.hdr h1{font-size:1rem;letter-spacing:3px;text-transform:uppercase;color:var(--sub);font-weight:400}
+#timeDisp{font-size:.7rem;color:#555;margin-top:3px}
+.tabs{display:flex;background:var(--card);border-radius:var(--r);padding:4px;margin-bottom:16px;gap:4px}
+.tab{flex:1;padding:9px 4px;text-align:center;border-radius:9px;cursor:pointer;font-size:.8rem;font-weight:600;transition:.2s;color:var(--sub)}
+.tab.active{background:var(--accent);color:#000}
+.page{display:none}
+.page.active{display:block}
+.card{background:var(--card);border-radius:var(--r);padding:16px;box-shadow:0 4px 20px rgba(0,0,0,.7);margin-bottom:13px}
+.card-title{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--sub);margin-bottom:12px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tile{background:var(--card2);border-radius:10px;padding:14px 10px;text-align:center}
+.tile .lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:1px;color:var(--sub);margin-bottom:6px}
+.tile .val{font-size:1.9rem;font-weight:700;line-height:1}
+.tile .unit{font-size:.8rem;color:var(--sub);font-weight:400}
+.tile.accent .val{color:var(--accent)}
+.temp-ctrl{display:flex;align-items:center;justify-content:center;gap:18px;padding:6px 0}
+.btn-circ{width:50px;height:50px;border-radius:50%;border:2px solid var(--accent);background:transparent;color:var(--accent);font-size:1.5rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.btn-circ:active{background:var(--accent);color:#000}
+.big-temp{font-size:3rem;font-weight:700;color:var(--accent);min-width:110px;text-align:center;line-height:1}
+.badge{display:inline-block;padding:5px 14px;border-radius:20px;font-size:.75rem;font-weight:700;letter-spacing:1.5px}
+.pow-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.btn-pow{padding:16px;border-radius:var(--r);border:none;font-size:1rem;font-weight:700;cursor:pointer;transition:.2s}
+.btn-pow.on{background:#27ae60;color:#fff}
+.btn-pow.off{background:#c0392b;color:#fff}
+.btn-pow:active{opacity:.8}
+.mode-grid,.fan-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}
+.sel-btn{padding:9px 3px;border-radius:9px;border:2px solid transparent;background:var(--card2);color:var(--sub);cursor:pointer;text-align:center;font-size:.62rem;font-weight:700;transition:.2s;line-height:1.5;text-transform:uppercase}
+.sel-btn .ico{display:block;font-size:1.2rem;margin-bottom:3px}
+.sel-btn.active{border-color:var(--accent);color:var(--accent);background:#00BFFF14}
+.sel-btn.heat.active{border-color:var(--heat);color:var(--heat);background:#FF6B3514}
+.sel-btn.fan.active{border-color:var(--fan);color:var(--fan);background:#32CD3214}
+.btn-ir{width:100%;padding:17px;border-radius:var(--r);border:none;background:var(--accent);color:#000;font-size:1rem;font-weight:800;cursor:pointer;margin-top:4px}
+.btn-ir:active{opacity:.8}
+.btn-del{background:var(--del);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:.9rem;flex-shrink:0;font-weight:700}
+.btn-save-sched{width:100%;padding:15px;border-radius:var(--r);border:none;background:var(--save);color:#fff;font-size:1rem;font-weight:700;cursor:pointer;margin-top:8px}
+.btn-save-sched:active{opacity:.8}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(70px);background:#2a2a2a;border:1px solid #444;color:var(--text);padding:10px 22px;border-radius:25px;font-size:.82rem;transition:.3s;opacity:0;pointer-events:none;z-index:100;white-space:nowrap}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.sched-entry{background:var(--card2);border-radius:10px;padding:10px;margin-bottom:8px}
+.sched-away{background:#2a1414}
+.sched-home-exc{background:#1a2214}
+.se-top{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.se-lbl{font-size:.63rem;color:var(--sub);flex-shrink:0}
+.se-input{background:#2a2a2a;border:1px solid #3a3a3a;color:var(--text);padding:5px 6px;border-radius:7px;font-size:.8rem;outline:none}
+.sched-away .se-input{background:#341a1a;border-color:#5a3030}
+select.se-input{-webkit-appearance:none;appearance:none;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23777'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center;padding-right:20px}
+.se-sel-time{width:112px}.se-sel-temp{width:78px}.se-sel-lim{width:74px}.se-sel-pre{width:94px}
+.sched-add-row{display:flex;gap:8px;margin-top:8px}
+.btn-add-entry{flex:1;background:transparent;border:1px dashed #444;color:var(--sub);padding:8px;border-radius:7px;cursor:pointer;font-size:.75rem}
+.btn-add-away-entry{flex:1;background:transparent;border:1px dashed #e74c3c66;color:#e74c3c99;padding:8px;border-radius:7px;cursor:pointer;font-size:.75rem}
+.btn-add-home-exc-entry{flex:1;background:transparent;border:1px dashed #32CD3266;color:#32CD3299;padding:8px;border-radius:7px;cursor:pointer;font-size:.75rem}
+.away-tag{background:#e74c3c22;color:#e74c3c;border:1px solid #e74c3c;border-radius:4px;padding:2px 7px;font-size:.62rem;font-weight:700;flex-shrink:0}
+.home-exc-tag{background:#32CD3222;color:#32CD32;border:1px solid #32CD32;border-radius:4px;padding:2px 7px;font-size:.62rem;font-weight:700;flex-shrink:0}
+.day-btn{width:26px;height:26px;border-radius:50%;border:1px solid #444;background:transparent;color:var(--sub);cursor:pointer;font-size:.62rem;font-weight:700;padding:0;flex-shrink:0;transition:.15s}
+.day-btn.active{background:var(--accent);color:#000;border-color:var(--accent)}
+.se-days{display:flex;gap:4px;margin:8px 0 4px}
+.home-temp-row{text-align:center;padding:6px 0 10px}
+.away-card{border:1px solid #FFD70033;background:#2a2600}
+.away-card .card-title{color:#FFD700}
+.away-limits{color:#FFD700;font-size:.85rem;text-align:center;margin-bottom:4px}
+.btn-ovr-clear{width:100%;padding:13px;border-radius:var(--r);border:1px solid #FFD700;background:transparent;color:#FFD700;font-size:.85rem;font-weight:700;cursor:pointer}
+.btn-ovr-clear:active{background:#FFD70022}
+.ovr-card{border:1px solid #FFD70044}
+.stgl{display:flex;gap:6px;margin-bottom:10px}
+.stgl-btn{flex:1;padding:7px;border-radius:7px;border:1px solid #333;background:transparent;color:var(--sub);cursor:pointer;font-size:.72rem;font-weight:700}
+.stgl-btn.active{background:var(--accent);color:#000;border-color:var(--accent)}
+.cal-thdr{display:flex;padding-left:28px;margin-bottom:3px}
+.cal-tbar{flex:1;position:relative;height:12px}
+.cal-tl{position:absolute;font-size:.5rem;color:#444;transform:translateX(-50%);bottom:0}
+.cal-row{display:flex;align-items:center;margin-bottom:3px}
+.cal-day{width:28px;font-size:.58rem;font-weight:700;color:var(--sub);text-align:right;padding-right:5px;flex-shrink:0}
+.cal-day.today{color:var(--accent)}
+.cal-bar{flex:1;height:28px;background:#181818;border-radius:4px;position:relative;overflow:hidden;border:1px solid #252525}
+.cal-seg{position:absolute;top:2px;bottom:2px;border-radius:2px;display:flex;align-items:center;overflow:hidden;min-width:2px}
+.cs-away{background:#e74c3c33;border:1px solid #e74c3c55}
+.cs-home{background:#27ae6033;border:1px solid #27ae6055}
+.cs-pre{background:#e67e2260;border:1px solid #e67e2288}
+.cal-seg-txt{font-size:.44rem;color:#ffffffaa;white-space:nowrap;overflow:hidden;padding:0 3px}
+.cal-now{position:absolute;top:0;bottom:0;width:2px;background:var(--accent);z-index:5}
+.cal-vline{position:absolute;top:0;bottom:0;width:1px;background:#252525;z-index:1;pointer-events:none}
+.cal-legend{display:flex;gap:12px;justify-content:center;margin-top:8px}
+.cal-legend span{font-size:.58rem;color:#888}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hdr">
+    <h1>&#9651; Daikin Smart Control</h1>
+    <div id="timeDisp">--:--:--</div>
+  </div>
+  <div class="tabs">
+    <div class="tab active" onclick="goTab('dash',this)">Dashboard</div>
+    <div class="tab" onclick="goTab('ctrl',this)">AC Control</div>
+    <div class="tab" onclick="goTab('sched',this)">Schedule</div>
+    <div class="tab" onclick="goTab('data',this)">History</div>
+  </div>
+  <div id="dash" class="page active">
+    <div class="card away-card" id="away-card" style="display:none">
+      <div class="card-title">&#9992; Away Mode Active</div>
+      <div class="away-limits" id="away-limits">Protecting --&#176;&#8211;--&#176;F</div>
+    </div>
+    <div class="card ovr-card" id="ovr-card" style="display:none">
+      <div class="card-title" style="color:#FFD700">&#9881; Manual Override Active</div>
+      <div style="font-size:.78rem;color:#aaa;text-align:center;margin-bottom:10px">Schedule paused for ~1 hour</div>
+      <button class="btn-ovr-clear" onclick="clearOverride()">&#8635;&nbsp; Resume Schedule</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Live Sensor Data</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+        <div class="tile">
+          <div class="lbl">Room Temp</div>
+          <div class="val" id="dTemp">--<span class="unit"> &deg;F</span></div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Outdoor</div>
+          <div class="val" id="dOut">--<span class="unit"> &deg;F</span></div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Humidity</div>
+          <div class="val" id="dHum">--<span class="unit"> %</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="card-title">Target Temperature</div>
+      <div class="temp-ctrl">
+        <button class="btn-circ" onclick="adjTemp(-1)">&#8722;</button>
+        <div class="big-temp" id="targetDisp">--&deg;</div>
+        <button class="btn-circ" onclick="adjTemp(1)">+</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">System Status</div>
+      <div class="g2">
+        <div class="tile">
+          <div class="lbl">AC State</div>
+          <div class="val" style="font-size:1rem;padding-top:4px">
+            <span class="badge" id="stateBadge" style="background:#8881a;color:#888;border:1px solid #888">IDLE</span>
+          </div>
+        </div>
+        <div class="tile">
+          <div class="lbl">AC Power</div>
+          <div class="val" style="font-size:1.4rem;color:#888" id="dPower">--</div>
+        </div>
+        <div class="tile accent">
+          <div class="lbl">Set Point</div>
+          <div class="val" id="dTarget">--<span class="unit">&deg;</span></div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Mode / Fan</div>
+          <div class="val" style="font-size:.85rem;text-transform:uppercase;padding-top:4px" id="dModeInfo">-- / --</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="ctrl" class="page">
+    <div class="card ovr-card" id="ovr-card-ctrl" style="display:none">
+      <div class="card-title" style="color:#FFD700">&#9881; Manual Override Active</div>
+      <div style="font-size:.78rem;color:#aaa;text-align:center;margin-bottom:10px">Schedule paused for ~1 hour</div>
+      <button class="btn-ovr-clear" onclick="clearOverride()">&#8635;&nbsp; Resume Schedule</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Power</div>
+      <div class="pow-grid">
+        <button id="pow-on"  class="btn-pow on"  onclick="setPower(true)">&#9646;&#9646; POWER ON</button>
+        <button id="pow-off" class="btn-pow off" onclick="setPower(false)">&#9632; POWER OFF</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Mode</div>
+      <div class="mode-grid">
+        <button class="sel-btn" id="m-cool" onclick="setMode('cool')"><span class="ico">&#10052;</span>Cool</button>
+        <button class="sel-btn heat" id="m-heat" onclick="setMode('heat')"><span class="ico">&#9832;</span>Heat</button>
+        <button class="sel-btn fan" id="m-fan" onclick="setMode('fan')"><span class="ico">&#9698;</span>Fan</button>
+        <button class="sel-btn" id="m-auto" onclick="setMode('auto')"><span class="ico">&#8635;</span>Auto</button>
+        <button class="sel-btn" id="m-dry" onclick="setMode('dry')"><span class="ico">&#9670;</span>Dry</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Fan Speed</div>
+      <div class="fan-grid">
+        <button class="sel-btn" id="f-auto" onclick="setFan('auto')"><span class="ico">&#8635;</span>Auto</button>
+        <button class="sel-btn" id="f-low" onclick="setFan('low')"><span class="ico">&#9657;</span>Low</button>
+        <button class="sel-btn" id="f-mid" onclick="setFan('mid')"><span class="ico">&#9658;</span>Mid</button>
+        <button class="sel-btn" id="f-high" onclick="setFan('high')"><span class="ico">&#9654;</span>High</button>
+        <button class="sel-btn" id="f-turbo" onclick="setFan('turbo')"><span class="ico">&#9889;</span>Turbo</button>
+      </div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="card-title">Temperature Setpoint</div>
+      <div class="temp-ctrl">
+        <button class="btn-circ" onclick="adjTemp(-1)">&#8722;</button>
+        <div class="big-temp" id="ctrlTargetDisp">--&deg;</div>
+        <button class="btn-circ" onclick="adjTemp(1)">+</button>
+      </div>
+    </div>
+    <button class="btn-ir" onclick="sendACCommand()">&#9889;&nbsp; Send IR Command to Daikin</button>
+  </div>
+  <div id="sched" class="page">
+    <div class="card">
+      <div class="card-title">Weekly Schedule</div>
+      <div id="schedContainer"><div style="color:var(--sub);text-align:center;padding:20px">Loading...</div></div>
+      <button class="btn-save-sched" onclick="saveSchedule()">&#10003;&nbsp; Save Schedule</button>
+    </div>
+  </div>
+  <div id="data" class="page">
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div class="card-title" style="margin:0">Temperature &amp; Humidity History</div>
+        <button class="sel-btn" onclick="loadHistory()" style="padding:6px 14px;font-size:.7rem">&#8635; Refresh</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <button class="sel-btn" id="v6h" onclick="setHistView('6h')" style="flex:1;padding:10px 4px">6h</button>
+        <button class="sel-btn active" id="v12h" onclick="setHistView('12h')" style="flex:1;padding:10px 4px">12h</button>
+        <button class="sel-btn" id="v24h" onclick="setHistView('24h')" style="flex:1;padding:10px 4px">24h</button>
+        <button class="sel-btn" id="v7d" onclick="setHistView('7d')" style="flex:1;padding:10px 4px">7d</button>
+        <button class="sel-btn" id="vcustom" onclick="setHistView('custom')" style="padding:10px 12px" title="Custom range">&#9881;</button>
+      </div>
+      <div id="customRangeDiv" style="display:none;align-items:center;justify-content:center;gap:6px;margin-bottom:10px">
+        <button onclick="adjCustomHours(-24)" class="sel-btn" style="padding:7px 8px;font-size:.68rem">&#8722;24h</button>
+        <button onclick="adjCustomHours(-6)" class="sel-btn" style="padding:7px 8px;font-size:.68rem">&#8722;6h</button>
+        <button onclick="adjCustomHours(-1)" class="sel-btn" style="padding:7px 8px;font-size:.68rem">&#8722;1h</button>
+        <input type="number" id="customHrsDisp" min="1" max="720" value="48"
+          onchange="_applyCustomHours(parseInt(this.value,10)||48)"
+          style="width:52px;text-align:center;font-size:1rem;font-weight:700;color:var(--accent);background:transparent;border:none;border-bottom:1px solid var(--accent);outline:none;-webkit-appearance:none;-moz-appearance:textfield">
+        <span style="color:var(--accent);font-weight:700">h</span>
+        <button onclick="adjCustomHours(1)" class="sel-btn" style="padding:7px 8px;font-size:.68rem">+1h</button>
+        <button onclick="adjCustomHours(6)" class="sel-btn" style="padding:7px 8px;font-size:.68rem">+6h</button>
+        <button onclick="adjCustomHours(24)" class="sel-btn" style="padding:7px 8px;font-size:.68rem">+24h</button>
+      </div>
+      <canvas id="histCanvas" style="display:block;width:100%;background:#111;border-radius:8px"></canvas>
+      <div style="display:flex;gap:14px;justify-content:center;margin-top:7px;font-size:.62rem;flex-wrap:wrap">
+        <span style="color:#00BFFF">&#9135; Indoor</span>
+        <span style="color:#FF7043">- - Outdoor</span>
+        <span style="color:#69FF47">- - Humidity</span>
+        <span style="color:#FF6B35">&#9646; Heating</span>
+        <span style="color:#00BFFF99">&#9646; Cooling</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title" id="statsPeriod">24h Stats</div>
+      <div class="g2">
+        <div class="tile"><div class="lbl">Min Temp</div><div class="val" id="hMinT">--<span class="unit">&deg;</span></div></div>
+        <div class="tile"><div class="lbl">Max Temp</div><div class="val" id="hMaxT">--<span class="unit">&deg;</span></div></div>
+        <div class="tile"><div class="lbl">Avg Temp</div><div class="val" id="hAvgT">--<span class="unit">&deg;</span></div></div>
+        <div class="tile"><div class="lbl">Avg Humidity</div><div class="val" id="hAvgH">--<span class="unit">%</span></div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div class="card-title" style="margin:0">System Log</div>
+        <div style="display:flex;gap:8px">
+          <button class="sel-btn" onclick="loadLog()" style="padding:6px 14px;font-size:.7rem">&#8635; Refresh</button>
+          <button class="sel-btn" onclick="clearLog()" style="padding:6px 14px;font-size:.7rem;color:#ff6b6b">&#128465; Clear</button>
+        </div>
+      </div>
+      <pre id="logBox" style="background:#0a0a0a;border-radius:8px;padding:10px;font-size:.63rem;color:#aaa;overflow-y:auto;max-height:260px;margin:0;white-space:pre-wrap;word-break:break-all">—</pre>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>

@@ -1,0 +1,721 @@
+================================================================================
+  DAIKIN SMART THERMOSTAT — CHANGELOG
+================================================================================
+  Format: newest entries at the top.
+  Dates marked ~ are approximate based on log archives and data timestamps.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+  2026-04-12
+--------------------------------------------------------------------------------
+
+REMOVED Pelonis backup heater — hardware removed, moving soon
+  - Stripped all Pelonis/backup heater code from ac_mgr.py, main.py,
+    _web_p1.html, _web_p2.html, and ir_pelonis.py (file kept but unused).
+  - Removed: backup heater auto-on/off logic, hysteresis, min on/off timers,
+    Pelonis sanity check, warning banner, heater status card, AC Control
+    heater panel, /api/heater/on and /api/heater/off endpoints, `heater`
+    and `warn` fields from /api/data JSON.
+  - Daikin runaway detection retained (it's independent of Pelonis).
+  Files: ac_mgr.py, main.py, _web_p1.html, _web_p2.html
+
+FIXED   Automatic IR commands missed by Daikin — threading timing corruption
+  - Observed: manual web UI commands always worked; automatic heartbeat/schedule
+    commands frequently missed. Root cause: utime.sleep_us() in the IR bit-bang
+    loop releases MicroPython's GIL, allowing the web server thread to wake mid-
+    frame and corrupt microsecond-level IR timing. Daikin received a garbled frame
+    it couldn't decode.
+  - Fix: wrap each IR frame transmission in machine.disable_irq() / enable_irq().
+    Applied to both ir_daikin.py and ir_pelonis.py.
+  Files: ir_daikin.py, ir_pelonis.py
+
+FIXED   Boot IR resend missed — commands firing every 2 min all session
+  - Observed: after boot, heartbeat commands firing every 2 minutes continuously
+    for hours (stuck=496m). Root cause was the 2-min boot-retry heartbeat window
+    that was added as a workaround — it had no expiry and ran indefinitely because
+    the schedule check reset _last_ir_ticks every minute via mode comparison.
+  - Fix: removed the boot-retry heartbeat entirely. The disable_irq fix makes IR
+    sends reliable, so 3x boot resend in main.py is sufficient. Heartbeat back to
+    normal 20-min interval.
+  Files: ac_mgr.py, main.py
+
+FIXED   boot_resend cool-suppress skip left _last_sent_mode stale
+  - When boot_resend skipped a cool resend (outdoor < 70°F), _last_sent_mode
+    remained at its previous value rather than being cleared. Smart logic could
+    inherit incorrect mode on first evaluation.
+  - Fix: explicitly set _last_sent_mode = None on cool-suppress skip so smart
+    logic evaluates mode fresh.
+  Files: ac_mgr.py (boot_resend)
+
+FIXED   learn_mgr division by zero if all episodes have zero/negative rise
+  - avg_rate could be 0 or negative if history.csv contained measurement errors
+    (sensor glitch, immediate shutoff). Division by zero would crash the daily
+    learning run silently.
+  - Fix: added guard `if avg_rate <= 0: continue` before the division.
+  Files: learn_mgr.py
+
+--------------------------------------------------------------------------------
+  2026-04-05
+--------------------------------------------------------------------------------
+
+FIXED   Persistence boost disabled all night — Daikin idling at low output
+  - Observed: room at 73.5°F (target 74°F), Daikin running continuously from
+    23:55 to 08:30 (8.5 hours) with stuck=496m. IR setpoint stuck at 74.0°F
+    the entire night despite persistence timer running.
+  - Root cause: 2026-04-04 fix added `delta >= 1.0` guard to persistence boost.
+    Room at 73.5°F (delta=0.5°F) → guard blocked boost → IR=74°F → Daikin
+    "almost done" → ran at minimum output → heat loss at 38°F outdoor exactly
+    matched heat gain → equilibrium, never reached target.
+  - Fix 1: Removed `delta >= 1.0` guard. Persistence boost now applies at any
+    delta. Room near target + stuck 60 min → IR climbs to 76-78°F → Daikin runs
+    at full output → reaches target → shuts off cleanly. Better for energy than
+    idling all night.
+  - Fix 2: Cool suppress no longer fires during an active heating run. Previously:
+    persistence boost → room overshot to 75°F → `needed='cool'` → cool suppress
+    fired → Daikin off → restart cycle every 2 hours. Now: when `ac_power=True`
+    and `_last_sent_mode='heat'`, cool suppress is skipped and the target-reached
+    guard (delta <= -1.0) handles the overshoot cleanly with a single off command.
+  Files: ac_mgr.py (_heat_boost, check_and_update cool suppress block)
+
+--------------------------------------------------------------------------------
+  2026-04-04
+--------------------------------------------------------------------------------
+
+FIXED   Persistence boost causing 2-hour overshoot cycle all night
+  - Observed: heating run would reach ~73.5°F (0.5°F below 74°F target) and
+    stall. Stuck timer ran for 60–99 min → IR setpoint climbed to 78°F. Room
+    then overshot to 75°F+ → cool suppress fired → Daikin off → 20-min lockout
+    → room dropped to 72°F → heat restarted → repeat, all night.
+  - Root cause: _heat_boost() applied persistence boost even when delta < 1°F
+    (room nearly at target, just coasting the last bit). Base boost was 0 but
+    persistence still added up to +4°F → IR=78°F for a room at 73.5°F.
+  - Fix: persistence boost now only applies when delta >= 1.0°F. When the room
+    is within 1°F of target the Daikin will close the gap naturally; no extra
+    push needed.
+  Files: ac_mgr.py (_heat_boost)
+
+FIXED   Runaway detection false positive after manual cool → cool suppress
+  - Observed: user manually set cool to 68°F; cool suppress fired (outdoor
+    46°F < 70°F); room naturally warmed from 68°F to 70.2°F in 15 min;
+    runaway detection fired and resent off command unnecessarily.
+  - Root cause: no guard for post-AC-off equilibration. Room always warms back
+    toward ambient after a cooling run; this is normal, not a runaway.
+  - Fix: runaway check skips for 20 min after AC was last commanded off,
+    giving the room time to equilibrate before suspicious-rise detection runs.
+  Files: ac_mgr.py (check_sanity, set_ir_command → _last_ac_off_ticks)
+
+--------------------------------------------------------------------------------
+  2026-03-27
+--------------------------------------------------------------------------------
+
+FIXED   Pelonis backup heater cycling all night without auto-off
+  - Observed: Pelonis turned on at 21:47, room oscillated 70.7–72.9°F all night
+    with target 73°F. Software logged multiple ON/OFF cycles but physical heater
+    likely stayed on (NEC toggle commands missed, causing state inversion).
+  - Root cause: combined heating (Daikin + Pelonis) pushed room to ~72.9°F
+    (delta < 1.0°F hysteresis → auto-off), then room dropped back to 71°F
+    (delta = 2.0°F → auto-on again). Period ~20–40 min, all night long.
+    Each NEC toggle can be missed by the heater's IR receiver; with many toggles
+    per night, one miss inverts state — "off" command turns it on, "on" turns off.
+  - Fix 1: 60-min auto-on lockout after any auto-off. After backup heater turns
+    off automatically (either via hysteresis threshold or target reached), the
+    auto-on logic is blocked for 60 min. This prevents cycling and dramatically
+    reduces the number of NEC toggle commands sent per night.
+  - Fix 2: minimum on-time raised 5 → 20 min. Backup heater must run at least
+    20 min before auto-off is considered; reduces boundary toggling.
+  - Manual web UI button always bypasses the lockout (user-initiated toggles).
+  Files: ac_mgr.py
+
+ADDED   Persistence boost — IR setpoint slides up during long slow-progress runs
+  - Observed: with outdoor at 33°F and room 1°F below target, Daikin set to
+    IR=73°F (no boost since delta <1°F). Heat loss at 40°F differential matched
+    heat gain, producing 330+ min runs with only +1°F progress.
+  - Root cause: _heat_boost() only uses instantaneous delta. When delta is tiny
+    the boost is zero, leaving the Daikin idling at exactly target temp — not
+    enough to make progress when it's cold outside.
+  - Fix: added _heat_slow_since timer. When heating with delta < 2°F for >30 min,
+    IR setpoint slides up beyond the delta-based boost:
+      stuck  0–30 min : no extra boost
+      stuck 30–60 min : +0 to +2°F
+      stuck 60–90 min : +2 to +4°F (cap)
+    Resets when delta grows (making real progress), heating turns off, or mode
+    changes. Heartbeat log shows "stuck=Xm" when persistence boost is active.
+  Files: ac_mgr.py
+
+--------------------------------------------------------------------------------
+  2026-03-24 (continued)
+--------------------------------------------------------------------------------
+
+ADDED   Daikin runaway detection — auto-resend off when Daikin runs uncommanded
+  - If ac_power=False (software says Daikin is off) but room rises 1.5°F+ in
+    15 minutes while outdoor temp is below indoor temp, the system resends a
+    full stateful IR off frame. Unlike the Pelonis (NEC toggle), the Daikin
+    ARC433 protocol is stateful so power=False always turns it off regardless
+    of current unit state.
+  - Condition: ac_power=False AND outdoor at least 15°F below indoor AND rise
+    exceeds a threshold that scales DOWN as it gets colder:
+      gap 15°F → 2.5°F threshold  (mild, neighbor bleed through shared walls plausible)
+      gap 25°F → 2.0°F threshold
+      gap 35°F → 1.5°F threshold
+      gap 45°F → 1.0°F threshold  (floor — freezing outside, any rise is suspicious)
+    When it's very cold the outdoor cold pulls heat out faster than neighbor
+    bleed could push it in, so a smaller rise is enough to confirm the Daikin
+    is running uncommanded.
+  - 30 min cooldown between resends. Logs "[AC] Daikin runaway" to system.log.
+  Files: ac_mgr.py
+
+--------------------------------------------------------------------------------
+  2026-03-24
+--------------------------------------------------------------------------------
+
+FIXED   Pelonis rapid on/off cycling causing WDT crash
+  - Backup heater delta threshold sits at a boundary the temperature reading
+    crosses repeatedly (±0.1°F noise). With no minimum on-time, backup_needed
+    flipped True/False every 0.1s loop iteration, toggling the heater 30+ times
+    in rapid succession and spamming IR sends. Observed in log at ~22:54.
+  - Fix: added _PELONIS_MIN_ON_MS = 5 min in ac_mgr.py. Auto-off is gated —
+    backup heater must have been on at least 5 minutes before the smart logic
+    can turn it off. Manual web UI and target-reached shutoff are unaffected.
+  Files: ac_mgr.py
+
+FIXED   Pelonis refuses to turn off / gets out of sync
+  - turn_on() and turn_off() in ir_pelonis.py had early-return guards
+    (if _heater_on: return / if not _heater_on: return). If the software state
+    drifted from the actual heater state (missed IR, reboot), the web UI off
+    button silently did nothing.
+  - Fix: removed both guards. turn_on() and turn_off() always send the IR
+    command and always update state. The calling code in ac_mgr already gates
+    redundant auto-sends via is_on() checks.
+  Files: ir_pelonis.py
+
+FIXED   Post-reboot false cool trigger shutting off Daikin
+  - boot_resend() called ir_daikin.send() directly, bypassing set_ir_command(),
+    so _last_sent_mode was left as None after every reboot. The dead-band
+    fallback in check_and_update() uses _last_sent_mode to decide which mode
+    to continue — with None, it fell back to 'cool' if room temp was above
+    target. This triggered cool_suppress (outdoor < 70°F) and shut the Daikin
+    off immediately after every reboot, leaving no heat for up to 4+ hours on
+    cold nights (observed 00:24 shutoff on a 29°F night).
+  - Fix: boot_resend() now sets _last_sent_mode = ac_mode before the IR send.
+  Files: ac_mgr.py
+
+--------------------------------------------------------------------------------
+  2026-03-22
+--------------------------------------------------------------------------------
+
+ADDED   Hard cool-suppress when outdoor temp is below 70°F
+  - AC was running in cool mode even when outdoor temps were in the 60s, despite
+    the existing season guard. The season guard suppresses cooling when outdoor <
+    indoor, but has a 45-minute escape hatch that eventually allows AC anyway.
+  - New threshold: _COOL_HARD_SUPPRESS_F = 70.0°F. If outdoor temp is below this,
+    AC cooling is unconditionally blocked — no timer escape. Device returns IDLE
+    and the user can open a window instead. Threshold is a single constant in
+    ac_mgr.py and easy to adjust.
+  - Does not affect heating, away mode emergency cooling, or manual override.
+  Files: ac_mgr.py
+
+FIXED   WDT crash every ~4 minutes (second root cause: check_sanity() list growth)
+  - Even after the sched_mgr cache fix, 8KB allocation errors continued.
+    ac_mgr.check_sanity() was being called every 0.1s, appending one tuple to
+    _temp_history each call and rebuilding the list via list comprehension.
+    At 10 calls/sec over 15 minutes this grew to ~9000 entries — rebuilding an
+    8KB+ list on every call.
+  - Fix: gated check_sanity() to run at most every 30 seconds in main.py
+    (last_sanity_check timer). At one call per 30s the list stays < 30 entries
+    and never causes a large allocation.
+  Files: main.py
+
+FIXED   WDT crash every ~4 minutes (first root cause: sched_mgr heap allocation)
+  - sched_mgr.get_scheduled_state() called load_schedule() on every invocation,
+    which parsed schedule.json from flash (16KB JSON parse allocation) every
+    minute tick. Over time this fragmented the heap until a contiguous 16KB block
+    was unavailable.
+  - Fix: added _cache = None module-level variable. load_schedule() returns the
+    cached result on all calls after the first; save_schedule() updates the cache.
+    JSON is parsed only once per boot (or when the schedule is saved).
+  - Also replaced os.listdir() existence checks with try/except OSError in
+    sched_mgr.py, ac_mgr.py, and state_mgr.py (removed unnecessary import os).
+  Files: sched_mgr.py, ac_mgr.py, state_mgr.py
+
+--------------------------------------------------------------------------------
+  2026-03-21 (continued)
+--------------------------------------------------------------------------------
+
+FIXED   WDT crash every ~4 minutes from heap exhaustion
+  - The thermostat thread was the sole GC trigger (once per minute at the
+    minute tick). The web thread's /api/data endpoint is polled every ~1s by
+    the dashboard; each call allocates a large formatted JSON string plus
+    intermediate objects, none of which were collected between calls.
+  - A repeated `import ir_pelonis` inside _json_data() also ran on every API
+    call, causing redundant import overhead.
+  - After ~4 minutes the heap fragmented enough to cause "memory allocation
+    failed" in the thermostat thread. This stopped WDT feeding → WDT fired →
+    full device crash and reboot.
+  - Fixes applied:
+      1. gc.collect() added every 30s in the thermostat thread (independent of
+         the minute-tick trigger).
+      2. gc.collect() added after every web request closes in _web_loop().
+      3. ir_pelonis imported once at module level (_ir_pelonis) rather than on
+         every _json_data() call.
+  Files: main.py
+
+FIXED   WebREPL unreachable — device bound to wrong IP
+  - boot.py and wifi_mgr.py both called wlan.ifconfig() with a hardcoded
+    static IP of 192.168.x.x / gateway 192.168.4.1. boot.py's ifconfig call
+    was harmless but wifi_mgr.py's was setting the IP before DHCP could run.
+    After a soft reboot the WiFi interface retained the old static IP,
+    meaning WebREPL (bound at boot) was always at 192.168.x.x:8266 while
+    the HTTP server was thought to be at a different address.
+  - Fix: removed wlan.ifconfig() calls from both boot.py and wifi_mgr.py.
+    Device now uses DHCP; router's existing MAC reservation assigns 192.168.x.x
+    consistently. boot.py now prints the actual DHCP-assigned IP dynamically.
+  Files: boot.py, wifi_mgr.py
+
+FIXED   mpremote/WebREPL Ctrl+C blocked by BaseException catch
+  - _web_loop_forever() used `except BaseException` to restart the web loop
+    after any crash. This also caught KeyboardInterrupt, preventing mpremote
+    and other serial tools from breaking into the REPL for file transfers.
+  - Fix: changed to `except Exception`. KeyboardInterrupt (a BaseException
+    subclass, not an Exception subclass) now propagates normally, restoring
+    mpremote and Thonny interrupt functionality.
+  Files: main.py
+
+CHANGED  Calendar X-axis increased from 4 marks to 12 (every 2 hours)
+  - Previous: marks only at 12a, 6a, 12p, 6p — 6-hour gaps made it hard to
+    identify exact schedule times.
+  - Now: marks at every 2 hours (12a, 2a, 4a, 6a, 8a, 10a, 12p, 2p, 4p, 6p,
+    8p, 10p) with matching vertical grid lines at each interval.
+  Files: _web_p2.html
+
+ADDED   Week calendar view for schedule tab
+  - New visual calendar on the Schedule page showing all windows as colored
+    blocks across a 7-day horizontal Gantt chart. Each row is one day of the
+    week; the bar spans 00:00–24:00 with hour marks at midnight, 6am, noon,
+    and 6pm.
+  - Away windows: dark red. Home windows: dark green. Pre-conditioning portion
+    of an away window: orange overlay drawn on top of the away segment.
+  - Today's row is highlighted in accent blue with a ▶ prefix and a vertical
+    line tracking the current time (updated from /api/data every 5s).
+  - Midnight-crossing windows render as two segments split at 00:00.
+  - Toggle between Calendar (default) and List/Edit views. "Edit Schedule"
+    shortcut button at the bottom of the calendar jumps directly to the list.
+  - Save Schedule button remains always visible for quick saves after edits.
+  Files: _web_p1.html, _web_p2.html
+
+FIXED   Web loop crashing left device unreachable until power cycle
+  - Under the threaded architecture, the WDT is fed by the thermostat thread.
+    If the web loop died (e.g., from a KeyboardInterrupt via WebREPL, or any
+    unhandled exception at the BaseException level), the device stayed up
+    indefinitely with the thermostat running but port 80 dead.
+  - Fix: wrapped _web_loop() in _web_loop_forever(), an outer recovery loop
+    that catches BaseException, logs the reason, waits 1 second, and restarts
+    the web loop. The web server is now self-healing under any failure.
+  Files: main.py
+
+FIXED   Watchdog timeout too short for large file uploads via WebREPL
+  - webrepl_cli.py transfers at ~1 KB/s. _web_p2.html at 28KB takes ~27
+    seconds to upload. The 60-second WDT allowed only ~33s of margin, and
+    if the thermostat thread was busy (IR send + outdoor fetch) during the
+    upload, the WDT could fire mid-transfer, leaving the receiving file
+    partially written and causing a boot loop.
+  - Fix: WDT timeout raised from 60s to 90s. Largest file now has ~63s of
+    headroom — well clear of the 90s limit. Still fast enough to detect a
+    genuine hang (thermostat loop feeds WDT every 100ms).
+  Files: main.py
+
+FIXED   WiFi drop leaves device permanently unreachable
+  - wifi_mgr.connect() was called once at boot. If WiFi dropped mid-run
+    (router reboot, interference), the thermostat kept running and feeding
+    the WDT, so the device never rebooted. It was permanently stuck: HTTP
+    and WebREPL both unreachable, outdoor fetches silently failing.
+  - Fix: added wifi_mgr.ensure_connected(). The thermostat thread calls it
+    every 5 minutes. If WLAN is disconnected, it calls connect() to
+    re-establish the static IP and log the reconnection.
+  Files: wifi_mgr.py, main.py
+
+FIXED   NTP failure at boot was permanent — clock stayed at year 2000
+  - sync_time() was called once at boot with no retry. A transient network
+    hiccup meant the device ran indefinitely on the wrong clock: schedule
+    evaluated at wrong time, history logging disabled (year < 2024 guard).
+  - Fix: added time_mgr._synced flag and is_synced() accessor. The thermostat
+    thread retries NTP every 5 minutes until it succeeds. Once synced,
+    _synced = True and no further retries occur.
+  Files: time_mgr.py, main.py
+
+FIXED   Web thread could block 6 seconds on outdoor temp fetch
+  - outdoor_mgr.get_temp() triggers a blocking HTTP request when the 30-min
+    cache expires. _json_data() was calling get_temp() from the web thread,
+    meaning any /api/data poll arriving when the cache expired would stall
+    the entire web server for up to 6 seconds.
+  - Fix: added outdoor_mgr.get_cached() which returns _cached_temp without
+    triggering a fetch. _json_data() now calls get_cached(). All fetch
+    triggering happens exclusively from the thermostat thread via get_temp().
+  Files: outdoor_mgr.py, main.py
+
+FIXED   Backup heater 20-min warm-up timer accumulated across heating cycles
+  - _backup_heat_since was set on the first heating run and never reset when
+    the Daikin turned off. On the second heating run, the elapsed time already
+    exceeded the 20-minute threshold, so the backup heater could activate
+    immediately rather than waiting 20 consecutive minutes.
+  - Fix: reset _backup_heat_since = None at every Daikin power-off inside
+    check_and_update(): target-reached shutoff, season-guard suppress shutoff,
+    and away-mode temp-OK shutoff. The 20-min requirement now correctly
+    measures consecutive heating time per run, not cumulative since boot.
+  Files: ac_mgr.py
+
+--------------------------------------------------------------------------------
+  2026-03-21 (earlier)
+--------------------------------------------------------------------------------
+
+FIXED   Outdoor temp silently returning None after HTTP 202 from Open-Meteo
+  - Open-Meteo occasionally returns HTTP 202 (Accepted) when forecast data
+    generation is queued server-side. The old code called r.json() without
+    checking the status code first — on a 202 the body lacks the "current" key,
+    causing a KeyError that was silently swallowed. _cached_temp stayed None and
+    no outdoor temp was available for the next 30 minutes (the full cache window).
+  - Fix: check r.status_code == 200 before parsing. On any other status, log the
+    code and set _last_fetch = None so the next get_temp() call triggers an
+    immediate retry rather than waiting out the 30-minute interval.
+  Files: outdoor_mgr.py
+
+FIXED   Dashboard up/down buttons had no effect on schedule
+  - The /api/command?cmd=set endpoint was updating target_temp but not calling
+    ac_mgr.set_manual_override(). The schedule would overwrite the new temp on
+    the next minute tick, making the dashboard +/- buttons appear to do nothing.
+  - Fix: added ac_mgr.set_manual_override() to the cmd=set handler in main.py,
+    same as /api/ac already did. Up/down on the dashboard now behaves identically
+    to the AC Control page: sets target temp and pauses the schedule for 1 hour.
+  - Added toast notification "Target XX.X° — override active 1h" so the user
+    gets visual confirmation that the override is active.
+  Files: main.py, _web_p2.html
+
+CHANGED Threaded architecture — web server and thermostat run in parallel
+  - The original main loop ran the web server and thermostat logic on a single
+    core in alternation. A 0.5s socket timeout meant the thermostat brain ran
+    at most twice per second, and any slow HTTP client or IR send could stall
+    both. More critically, a crash in the thermostat logic could take the web
+    server down with it.
+  - Refactor: main.py split into two functions:
+      _thermostat_loop()  — background thread (sensor reads, schedule, AC brain,
+                            sanity check, data logging, WDT feeds)
+      _web_loop()         — main thread (HTTP server, all API handlers)
+    Started via `_thread.start_new_thread(_thermostat_loop, ())`.
+  - Thread safety: all shared state (t_f, h, target_temp, away_mode, etc.) uses
+    primitive float/int/bool types. MicroPython's GIL makes single reads/writes
+    to these atomic — no explicit locking needed.
+  - _recheck_schedule flag: cross-thread signal. When the web thread clears a
+    manual override, it sets _recheck_schedule = True. The thermostat thread
+    reads and clears this flag, then immediately re-evaluates the schedule
+    (equivalent to the old last_minute_checked = -1 trick, but the variable is
+    now local to the thermostat thread and not directly writable from outside).
+  - uasyncio was considered but rejected: IR sends use utime.sleep_us() for
+    microsecond-level timing and would block an async event loop.
+  Files: main.py
+
+REMOVED OTA HTTP upload endpoint (/ota/upload)
+  - The OTA endpoint in main.py received file uploads over plain HTTP POST. It
+    was useful as an alternative deploy path but required the main loop to be
+    healthy. WebREPL (boot.py) is fully independent — survives main.py crashes —
+    and supports the same file transfers. Having both created confusion about
+    which to use and added code surface area with no real benefit.
+  - Also removed: /ota/ from the DEPLOYMENT feature scope.
+  Files: main.py
+
+REMOVED cmd=up / cmd=down temperature commands
+  - GET /api/command?cmd=up and cmd=down incremented/decremented target_temp by
+    1°F. The web UI no longer uses these endpoints — up/down buttons call
+    sendTempCmd() which posts cmd=set with the exact new value. Removed the
+    handler branches from main.py to reduce dead code.
+  Files: main.py
+
+REMOVED IR test endpoints and globals (_ir_test_mode, _ir_test_pwm)
+  - /api/ir_test GET/POST endpoints and associated module-level globals were
+    leftover scaffolding from early hardware debugging. No code path or UI
+    element references them. Removed.
+  Files: main.py
+
+REMOVED ir_pelonis.py dead code (timer scaffolding)
+  - _wdt_feed() helper function: was needed when the turn_on() sequence included
+    a 1500ms sleep near the watchdog limit. WDT is now 60s and the sleep was
+    removed. The helper was unused.
+  - _CMD_TIMER_2H = None and _TIMER_DELAY_MS = 1500: constants left from the
+    2h timer feature (disabled in a prior fix). The conditional send block
+    `if _CMD_TIMER_2H is not None:` was dead code.
+  - All three removed without behavior change.
+  Files: ir_pelonis.py
+
+FIXED   ir_daikin.py missing from remote.py DEFAULT_FILES
+  - remote.py deploy uploads all files in DEFAULT_FILES. ir_daikin.py was not
+    in the list — it would be silently skipped on every deploy. Any change to
+    the Daikin IR driver would require a manual `remote.py upload ir_daikin.py`
+    to take effect.
+  - Fix: added 'ir_daikin.py' to DEFAULT_FILES.
+  Files: remote.py
+
+FIXED   Unimplemented 'exec' command listed in remote.py docstring
+  - The module docstring advertised a `remote.py exec <code>` command that was
+    never implemented (no handler in main()). Removed from docstring.
+  Files: remote.py
+
+REMOVED pymakr.conf
+  - Three-line Pymakr IDE extension stub `{"name": "ThermoStat"}`. Pymakr is
+    not used — all deploys go through remote.py / webrepl_cli.py. Deleted.
+
+ADDED   PROJECT.txt — full project documentation in repo root (docs/)
+  - Goal, scope, hardware summary, network/API reference, per-file summaries,
+    startup sequence, and known constraints/design decisions.
+
+ADDED   docs/CHANGELOG.txt — this file
+
+
+--------------------------------------------------------------------------------
+  ~2026-03-18 to 2026-03-20
+--------------------------------------------------------------------------------
+
+FIXED   Sanity check firing continuously with no cooldown
+  - Observed in logs (2026-03-18): "[AC] WARN: Room rising 0.5F..." fired
+    dozens of times back-to-back, sending emergency Pelonis off commands on
+    every single loop iteration. The sanity check had no cooldown and the
+    0.5°F rise threshold was far too sensitive — thermal inertia from a warm
+    floor or hot supply air alone can cause a 0.5°F reading rise.
+  - Fix: raised _SANITY_RISE_F from 0.5°F to 2.0°F (a rise that cannot be
+    explained by inertia alone when both heaters are commanded off).
+  - Fix: added _SANITY_COOLDOWN = 30 min. After firing, the check is suppressed
+    for 30 minutes to prevent spam and repeated emergency commands.
+  - Fix: reset _temp_history to [] after firing so stale rise data does not
+    re-trigger immediately when the cooldown expires.
+  Files: ac_mgr.py
+
+FIXED   Pelonis 2-hour timer causing rapid on/off cycling
+  - The turn_on() sequence sent POWER then waited 1500ms then sent TIMER_2H.
+    With the IR signal strength issues that existed at the time, the TIMER command
+    was being missed or double-received, causing the heater to toggle erratically.
+    Additionally, the Pelonis unit has its own built-in safety auto-off, making
+    the software timer redundant once IR reliability was resolved.
+  - Fix: disabled the 2h timer command (_CMD_TIMER_2H = None). The 1500ms wait
+    and WDT feeds remain in place but the timer send is skipped.
+  Files: ir_pelonis.py
+
+FIXED   OTA upload causing memory allocation failure and reboot
+  - Observed in logs (2026-03-18): "[OTA] error: memory allocation failed,
+    allocating 8551 bytes". Large file bodies were being held in the request
+    string while also trying to decode incoming chunks — double-buffering RAM.
+  - Fix: after parsing headers, the initial body bytes are extracted and the
+    full request string is immediately deleted (del request; gc.collect()) before
+    entering the chunk-read loop. This frees the request buffer so only the
+    incoming chunk and the open file handle coexist in RAM.
+  Files: main.py
+
+CHANGED Fan tier rate-limit interval increased from ~5 min to 20 min
+  - Early logs show fan tier changing every 5 minutes (turbo→mid→low) as the
+    room approached target. While correct in terms of delta tracking, frequent
+    IR sends cause brief Daikin mode-transition pauses and unnecessary RF noise.
+  - Changed _MIN_FAN_INTERVAL to 20 * 60 * 1000 ms (20 min). Fan tier still
+    changes immediately on the first send after boot (first_run guard).
+  Files: ac_mgr.py
+
+CHANGED Pelonis watchdog: added current_temp parameter to turn_on()
+  - Previously turn_on() had no baseline temperature, so the watchdog could not
+    detect "heater on but temp not rising." Added current_temp argument and
+    stored it as _temp_at_on. Watchdog now compares current_temp <= _temp_at_on
+    after WATCHDOG_MINS (15 min) to flag a possible IR miss or heater fault.
+  Files: ir_pelonis.py
+
+
+--------------------------------------------------------------------------------
+  ~2026-03-17
+--------------------------------------------------------------------------------
+
+MILESTONE  Real data collection begins (~20:04 local time)
+  - history.csv seed data (Mar 10–16) replaced by live sensor readings.
+  - First real entries: indoor 71.6°F, outdoor 18–25°F (cold snap), heating
+    active. System running reliably enough to leave collecting overnight.
+
+ADDED   fetch_logs.py — PC-side log and history archiver
+  - Pulls /api/log and /api/history over HTTP and saves timestamped archives
+    to ./logs/. Supports --log, --hist, --tail N flags.
+  - Enables offline analysis of history.csv without connecting to WebREPL.
+
+
+--------------------------------------------------------------------------------
+  ~Early March 2026 — initial build and hardware debugging
+--------------------------------------------------------------------------------
+
+FIXED   Boot loop from large HTML string literals
+  - The web page was originally a multi-kilobyte Python string in web_ui.py.
+    MicroPython's heap allocator panics at C level when a large string literal
+    is interned at module load time, before any user exception handling runs.
+    This caused an immediate boot loop with no useful output.
+  - Fix: moved all HTML and JavaScript into two static files (_web_p1.html,
+    _web_p2.html) served in 2 KB chunks. web_ui.py now only generates a tiny
+    (<500 byte) dynamic JavaScript variable block at runtime.
+  Files: web_ui.py, _web_p1.html, _web_p2.html (split from original web_ui.py)
+
+FIXED   WDT reset during Pelonis turn_on() 1500ms sleep
+  - The turn_on() sequence used utime.sleep_ms(1500) between the POWER command
+    and the TIMER_2H command. With the WDT at 8s (now 60s), this alone was safe,
+    but combined with IR send time and the surrounding main loop, it was cutting
+    the window too close and occasionally triggering a reboot mid-send.
+  - Fix: added _wdt_feed() calls immediately before and after the sleep.
+  Files: ir_pelonis.py
+
+FIXED   WDT reset during OTA file upload (large files)
+  - Receiving a large file in the main loop blocked long enough to hit the
+    watchdog. Each recv() call could itself take several hundred milliseconds.
+  - Fix: added wdt.feed() inside the chunk receive loop of /ota/upload.
+  Files: main.py
+
+FIXED   IR range near zero — 330Ω resistor misread from component kit
+  - The IR LED circuit was assembled with a 330Ω current-limiting resistor,
+    misread as 33Ω from the kit labeling. At 330Ω with a 5V supply, LED current
+    was ~10 mA — roughly 10x too low — reducing usable IR range to a few inches.
+  - Fix: replaced with 22Ω resistor, raising current to ~220 mA peak (pulsed),
+    which restored full-room IR range.
+  Hardware change only (no code impact)
+
+FIXED   IR range still marginal with single LED
+  - Even after correcting the resistor, a single LED did not reliably reach the
+    Daikin and Pelonis units from across the room.
+  - Fix: added a second 940nm IR LED in parallel on the same transistor circuit.
+    Two parallel LEDs roughly double radiant output without exceeding transistor
+    ratings at the 22Ω current limit.
+  Hardware change only (no code impact)
+
+FIXED   Pelonis toggling 3 times (on-off-on) when repeat=3 was used
+  - Daikin IR uses a stateful frame (full AC state in every packet), so repeating
+    the same frame 3 times just confirms the same command — safe and reliable.
+  - Pelonis uses NEC protocol with a POWER toggle command. Sending repeat=3 means
+    3 separate toggle commands reach the heater: on → off → on. Net result: the
+    heater ends up on but briefly flickers off and back on. This caused confusion
+    because the state appeared correct but the heater had cycled.
+  - Fix: repeat=1 for all Pelonis commands. Signal reliability is sufficient with
+    the corrected resistor and dual LEDs.
+  Files: ir_pelonis.py
+
+FIXED   Daikin out of sync after reboot until next heartbeat (up to 20 min)
+  - After a reboot the ESP32 knew its last AC state (from ac_state.json) but the
+    Daikin had no way to know the ESP32 had rebooted. If the Daikin had lost power
+    or changed state independently, it would stay mismatched for up to 20 minutes
+    until the heartbeat resend fired.
+  - Fix: added ac_mgr.boot_resend() called once in main.py after WiFi and NTP are
+    ready. If the last known state was power=True, it re-sends the saved IR frame
+    immediately on every boot.
+  Files: ac_mgr.py, main.py
+
+FIXED   "Resume Schedule" button did not take effect until next minute
+  - clear_override() was clearing the override flag, but the schedule logic only
+    re-evaluates once per minute (when last_minute_checked changes). After clearing,
+    the user would see the override card disappear but the old temp would stay in
+    effect for up to a full minute.
+  - Fix: after clear_override(), set last_minute_checked = -1 in main.py. This
+    forces the schedule block to run on the very next loop iteration.
+  Files: main.py
+
+ADDED   Backup heater support (Pelonis oil radiator)
+  - ir_pelonis.py: NEC IR driver, state persistence, boot-to-safe, watchdog
+  - ac_mgr.py: backup heater logic — activates after Daikin has been heating
+    20+ min, outdoor < 34°F, and room is still behind target by a temperature
+    delta that scales with outdoor temp (3°F at 34°F outdoor, down to 1.5°F
+    below 10°F outdoor). Auto-off when target reached. Never overrides a
+    manually-activated heater.
+  Files: ir_pelonis.py, ac_mgr.py
+
+ADDED   Sanity check for stuck-on backup heater
+  - Detects room warming while both Daikin and Pelonis are commanded off and it
+    is below 30°F outside. If room rises 2°F+ in a 15-minute window, sends an
+    emergency Pelonis off command and sets a warning in the web UI.
+  Files: ac_mgr.py
+
+ADDED   Outdoor temperature (Open-Meteo API)
+  - outdoor_mgr.py fetches current outdoor temp for [YOUR CITY] every 30 minutes.
+  - Used by: season guard (ac_mgr), heat boost (ac_mgr), backup heater thresholds
+    (ac_mgr), sanity check (ac_mgr), history logging (data_mgr).
+  Files: outdoor_mgr.py, ac_mgr.py, data_mgr.py, main.py
+
+ADDED   Adaptive learning (learn_mgr.py)
+  - Daily at 21:00, analyses history.csv for that day's pre-conditioning heating
+    episode and measures the actual heating rate (°F/min).
+  - After 3+ days of data, automatically adjusts the schedule's pre-conditioning
+    lead time so the home reaches target temp right at the end of the away window.
+  - Rolling 7-day average; 15% buffer; clamped 30–120 minutes; only updates if
+    change >= 5 minutes.
+  Files: learn_mgr.py, main.py
+
+ADDED   System log capture (log_mgr.py)
+  - Overrides builtins.print at startup so every print() call in the entire
+    codebase is also written to system.log on flash.
+  - Auto-trims to 150 lines when file exceeds 10 KB.
+  - Viewable and clearable from the History tab of the web UI.
+  Files: log_mgr.py, main.py
+
+ADDED   remote.py — PC-side deploy tool
+  - Wraps webrepl_cli.py for wireless file upload without USB.
+  - deploy: uploads all files in safe order (main.py last), then reboots.
+  - upload: upload specific files.
+  - reboot / settemp: convenience commands via HTTP API.
+  Files: remote.py
+
+ADDED   WebREPL deployment path (boot.py)
+  - boot.py starts WebREPL on port 8266 (password: thermo) before main.py runs.
+  - WebREPL is independent of the main loop — survives main.py crashes.
+  Files: boot.py
+
+ADDED   OTA HTTP upload endpoint (/ota/upload)
+  - Alternative to WebREPL for file uploads. POST to /ota/upload?file=<name>
+    with file content as body. More convenient for quick single-file updates
+    from scripts but requires the main loop to be healthy (uses the same
+    request handling path).
+  Files: main.py
+
+ADDED   Schedule system with away and home window types
+  - Away windows: energy-saving mode with heat/cool limit protection and
+    optional pre-conditioning timer before the window ends.
+  - Home windows: actively target a specific temperature during a time block.
+  - Midnight-crossing windows supported.
+  - Web UI: add/edit/delete windows with day toggles, time pickers, temp selectors.
+  Files: sched_mgr.py, _web_p1.html, _web_p2.html
+
+ADDED   Manual override (1 hour)
+  - Any manual command (web UI AC control, up/down buttons, cmd=set) triggers
+    a 1-hour pause of schedule and smart-adjust logic.
+  - "Resume Schedule" button clears the override immediately.
+  - Override status shown as a card on both Dashboard and AC Control tabs.
+  Files: ac_mgr.py, main.py, _web_p1.html, _web_p2.html
+
+ADDED   20-minute minimum off-time lockout
+  - After shutting off, the Daikin cannot be restarted for 20 minutes.
+  - Protects the compressor from short-cycling.
+  - Bypassed in away mode for emergency protection.
+  Files: ac_mgr.py
+
+ADDED   Heat boost — raised IR setpoint to force harder heating
+  - When room is behind target by 1–6°F, IR setpoint is raised 2–8°F above
+    the actual target. This makes the Daikin work harder without overshooting,
+    because the ESP32 shuts it off when actual room temp reaches target.
+  - Extra 2°F boost added when outdoor temp is below freezing (heat pump
+    capacity drops significantly in very cold weather).
+  Files: ac_mgr.py
+
+ADDED   Season guard — suppress wrong-season operation
+  - Prevents heating when outdoor > indoor (room will warm naturally) and
+    cooling when outdoor < indoor (room will cool naturally).
+  - If room remains out of range for 45+ minutes despite the guard, the
+    opposite mode is allowed as an emergency override.
+  Files: ac_mgr.py
+
+ADDED   History logging and chart (data_mgr.py, web UI)
+  - Logs indoor temp, humidity, AC state, and outdoor temp every 5 minutes
+    to history.csv. Max 1000 lines (~3.5 days); auto-trimmed.
+  - Web UI History tab: canvas chart with indoor/outdoor/humidity lines,
+    heating/cooling background color bands, and adaptive X-axis labels.
+  - View windows: 6h, 12h, 24h, 7-day, custom (adjustable in 1h/6h/24h steps).
+  - Stats card: min/max/avg temp and avg humidity for the selected window.
+  Files: data_mgr.py, _web_p1.html, _web_p2.html
+
+ADDED   DST-aware local time (time_mgr.py)
+  - NTP sync at boot. US Eastern time with automatic spring/fall DST transitions.
+  - Used for schedule evaluation, history timestamps, and web UI clock.
+  Files: time_mgr.py
+
+================================================================================
