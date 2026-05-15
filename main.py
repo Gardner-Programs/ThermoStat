@@ -195,7 +195,7 @@ def _thermostat_loop():
         except Exception as e:
             try:
                 print('[thermo] exception:', e)
-            except:
+            except Exception:
                 pass
             wdt.feed()
             gc.collect()
@@ -269,7 +269,7 @@ def _web_loop():
                     body = request.split('\r\n\r\n')[1]
                     sched_mgr.save_schedule(json.loads(body))
                     cl.send('HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n')
-                except:
+                except Exception:
                     cl.send('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
 
             # --- API: MANUAL COMMANDS ---

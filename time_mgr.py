@@ -26,7 +26,7 @@ def sync_time():
         ntptime.settime()
         _synced = True
         print("NTP sync complete.")
-    except:
+    except Exception:
         print("NTP sync failed.")
 
 

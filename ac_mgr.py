@@ -2,7 +2,7 @@ import time
 import json
 try:
     import outdoor_mgr as _outdoor
-except:
+except Exception:
     _outdoor = None
 
 ac_power = False

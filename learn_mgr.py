@@ -34,7 +34,7 @@ def load():
         if _LEARN_FILE in os.listdir():
             with open(_LEARN_FILE, 'r') as f:
                 return json.load(f)
-    except:
+    except Exception:
         pass
     return {'episodes': [], 'avg_rate': None, 'pre_con': None}
 
@@ -77,7 +77,7 @@ def _read_recent(max_entries):
                     buf.append(entry)
                     if len(buf) > max_entries:
                         buf.pop(0)
-                except:
+                except Exception:
                     pass
     except Exception as e:
         print('[Learn] read error:', e)
@@ -187,7 +187,7 @@ def run():
         try:
             eh, em   = end_str.split(':')
             end_mins = int(eh) * 60 + int(em)
-        except:
+        except Exception:
             continue
 
         hl = float(w.get('heat_limit', 62))
