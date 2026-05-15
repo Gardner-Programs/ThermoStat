@@ -1,0 +1,465 @@
+================================================================================
+  DAIKIN SMART THERMOSTAT — PROJECT DOCUMENTATION
+================================================================================
+  Hardware: ESP32-D (MicroPython)
+  Location: [YOUR CITY, STATE]
+  Last updated: 2026-04-12
+================================================================================
+
+
+--------------------------------------------------------------------------------
+  PROJECT GOAL
+--------------------------------------------------------------------------------
+
+Replace the factory remote for a Daikin split-system AC with a custom ESP32-based
+smart thermostat. The system reads room temperature from a DHT22 sensor and
+automatically decides when to run the Daikin in heat or cool mode — sending
+commands over IR instead of a wall thermostat or remote. A secondary Pelonis oil
+radiator serves as emergency backup heat when the Daikin heat pump loses capacity
+in very cold weather.
+
+Primary motivation: reduce electricity use by running the AC only when needed,
+supporting a weekly schedule (away/home windows), automatic pre-conditioning
+before the user arrives home, and intelligent heat-vs-cool decisions that account
+for outdoor temperature.
+
+
+--------------------------------------------------------------------------------
+  SCOPE OF FEATURES
+--------------------------------------------------------------------------------
+
+  HARDWARE CONTROL
+    - Daikin ARC433 IR protocol: power, mode (heat/cool/fan/dry/auto), fan speed
+      (auto/low/mid/high/turbo), and temperature setpoint
+    - Pelonis PSHO06MR6ASB oil heater: NEC IR protocol, power toggle only
+    - DHT22 temperature + humidity sensor on GPIO 26
+    - IR LED on GPIO 23 via NPN transistor + 22-ohm resistor circuit
+
+  SMART THERMOSTAT LOGIC (ac_mgr.py)
+    - Own heat/cool decision — avoids the Daikin's unreliable built-in auto mode
+    - Dead-band: 1°F either side of target before switching on/off
+    - Season guard: suppresses heating when outdoor > indoor (room heats naturally)
+      and vice versa; overrides after 45 min if room still out of range
+    - Cool suppress: hard block on AC cooling when outdoor < 70°F — no timer escape;
+      open a window instead (threshold: _COOL_HARD_SUPPRESS_F in ac_mgr.py)
+    - Dynamic fan speed: mid/high/turbo scaled to how far off target the room is
+    - Heat boost: IR setpoint raised above target temp so Daikin works harder;
+      extra boost below 32°F outdoor when heat pump capacity drops
+    - 20-minute minimum off-time lockout to prevent short-cycling
+    - 20-minute heartbeat: resends current IR state periodically to keep Daikin in sync
+    - Boot resend: restores and retransmits last IR state after any reboot;
+      sent 3x with 2s gaps for reliability; skips cool resend when outdoor < 70°F
+
+  SCHEDULE
+    - Weekly schedule stored in schedule.json
+    - Away windows: protect against extremes (configurable heat/cool limits)
+      while conserving energy; optional pre-conditioning timer
+    - Home windows: target a specific temperature during a configured time block
+      (e.g., warm up the room before waking)
+    - Default home_temp: used whenever no window is active
+    - Away mode does not block itself with lockout — safety always takes priority
+
+  ADAPTIVE LEARNING (learn_mgr.py)
+    - Runs daily at 21:00
+    - Reads history.csv for that day's pre-conditioning heating episode
+    - Measures actual heating rate (°F/min) from when Daikin started until target
+    - Stores a rolling 7-day average; updates the schedule's pre-conditioning
+      lead time automatically once 3+ episodes are collected
+    - Buffer: adds 15% safety margin; clamps between 30 and 120 minutes
+
+  OUTDOOR TEMPERATURE
+    - Polls Open-Meteo API (free, no key) every 30 minutes
+    - Lat/lon: [YOUR CITY] (see secrets.py)
+    - Used by ac_mgr for season guard, heat boost, backup heater thresholds,
+      sanity check, and history logging
+
+  WEB INTERFACE
+    - Single-page app served from the ESP32 on port 80
+    - Dashboard tab: live sensor readings, target temp up/down (1-hour override),
+      AC state badge, away mode card, override card, heater warning banner
+    - AC Control tab: full manual IR command (power, mode, fan, setpoint) —
+      triggers 1-hour override; backup heater manual on/off
+    - Schedule tab:
+        Calendar view (default): 7-row horizontal Gantt chart, one row per day,
+          00:00–24:00 time bar. Away windows in red, Home windows in green,
+          pre-conditioning overlays in orange. Today's row highlighted with
+          current-time marker updated from live data every 5s.
+        List/Edit view: add/edit/delete windows with day toggles, time pickers,
+          temp selectors, pre-conditioning time. Toggle between views with the
+          Calendar / List buttons; "Edit Schedule" shortcut at bottom of calendar.
+    - History tab: canvas chart of indoor, outdoor, and humidity over 6h/12h/24h/
+      7-day or custom range; heating/cooling background color bands; stats cards;
+      system log viewer with clear button
+
+  DEPLOYMENT / MAINTENANCE
+    - WebREPL on port 8266 (started in boot.py): wireless file upload, no USB needed.
+      Runs independently of main.py — survives crashes; primary deploy path.
+    - remote.py: PC-side deploy tool wrapping webrepl_cli.py
+    - fetch_logs.py: pulls system.log and history.csv to a local ./logs/ archive
+    - Watchdog timer (90s): reboots device if thermostat thread stalls. 90s gives
+      WebREPL file transfers (~1KB/s) a safe margin even for the largest files.
+    - system.log: all print() output captured to flash; viewable in web UI
+
+  PERSISTENCE (flash files)
+    - state.json      : target temperature (survives reboots)
+    - schedule.json   : weekly schedule windows
+    - ac_state.json   : last Daikin IR state (power/mode/fan/setpoint)
+    - pelonis_state.json : Pelonis on/off state
+    - learning.json   : episode history and averaged heating rate
+    - history.csv     : 5-min sensor + state log, max 1000 lines (~3.5 days)
+    - system.log      : rolling print() capture, max ~10 KB / 150 lines
+
+
+--------------------------------------------------------------------------------
+  HARDWARE SUMMARY
+--------------------------------------------------------------------------------
+
+  Component         Detail
+  ----------------  -------------------------------------------------------------
+  Microcontroller   ESP32-D running MicroPython
+  Temperature       DHT22 on GPIO 26
+  IR transmitter    GPIO 23 → 1kΩ → NPN base; collector: 5V → 22Ω → 2x IR LEDs
+                    in parallel → collector; emitter → GND
+  IR LEDs           2x generic 940nm 5mm (parallel for range; 1 LED insufficient)
+  Primary HVAC      Daikin mini-split, ARC433 protocol
+  Network           DHCP with router reservation — always 192.168.x.x
+
+  IR notes:
+    - Daikin: stateful frame, safe to repeat. Off commands sent twice (200ms gap)
+      for reliability. All frame sends protected by machine.disable_irq().
+    - Two IR LEDs in parallel required for reliable range (single LED insufficient).
+      22Ω resistor — original 330Ω kit resistor reduced range to near zero.
+
+
+--------------------------------------------------------------------------------
+  NETWORK / CONNECTIVITY
+--------------------------------------------------------------------------------
+
+  IP address    192.168.x.x (DHCP reservation on router)
+  Web UI        http://192.168.x.x/
+  WebREPL       ws://192.168.x.x:8266  password: thermo
+  API base      http://192.168.x.x/api/
+
+  API endpoints:
+    GET  /api/data             Live sensor + state JSON
+    GET  /api/schedule         Schedule JSON
+    POST /api/schedule         Save schedule
+    POST /api/ac               Send manual IR command (sets 1-hour override)
+    GET  /api/command?cmd=...  Misc commands:
+                                 cmd=set&val=<F>     set target temp + 1h override
+                                 cmd=override_clear  resume schedule immediately
+    GET  /api/history          Stream history.csv
+    GET  /api/log              Stream system.log
+    POST /api/log/clear        Delete system.log
+    POST /api/reboot           Reboot ESP32
+
+
+--------------------------------------------------------------------------------
+  FILE SUMMARY — DEVICE FILES (run on ESP32)
+--------------------------------------------------------------------------------
+
+  boot.py
+    Runs automatically before main.py on every power-on. Connects to WiFi using
+    static IP and credentials from secrets.py, then starts WebREPL on port 8266
+    (password: thermo). WebREPL runs independently of the main loop — if main.py
+    crashes, WebREPL still works so files can be uploaded without USB.
+
+  main.py
+    Application entry point. Runs two parallel threads after boot:
+
+    _thermostat_loop() — background thread (ESP32 second core via _thread)
+      - Reads DHT22 sensor every 2.5 seconds
+      - Runs schedule logic once per minute (or immediately when _recheck_schedule
+        is set by the web thread after an override clear)
+      - Calls ac_mgr.check_and_update() and check_sanity() every 100ms
+      - Calls data_mgr.maybe_log() every 5 minutes
+      - Triggers learn_mgr.run() once daily at 21:00
+      - Feeds the watchdog timer every iteration
+
+    _web_loop() — inner HTTP server loop (one connection at a time, 0.5s timeout)
+      - Routes all API requests: /api/data, /api/schedule, /api/ac,
+        /api/command, /api/heater/on|off, /api/history, /api/log,
+        /api/log/clear, /api/reboot
+      - Serves the HTML app (_web_p1.html + web_ui init block + _web_p2.html)
+
+    _web_loop_forever() — outer recovery wrapper (main thread)
+      - Calls _web_loop() in a loop; catches BaseException (including
+        KeyboardInterrupt from WebREPL), logs the reason, waits 1s, and
+        restarts. The web server is self-healing under any failure.
+
+    Shared state (module-level globals):
+      t_f, h, current_ac_state, target_temp, away_mode, away_heat_limit,
+      away_cool_limit, _recheck_schedule
+    Thread safety: all shared values are primitive (float/int/bool); MicroPython's
+    GIL makes individual reads/writes atomic. No explicit locking needed.
+
+  ac_mgr.py
+    Smart thermostat brain and IR command dispatcher. All heating/cooling
+    decisions go through this module. Key functions:
+
+      check_and_update(current_temp, target_temp, away, heat_limit, cool_limit)
+        Called every loop iteration. Decides whether to start, stop, or adjust
+        the Daikin. Away mode bypasses lockout for emergency protection. Normal
+        mode includes: dead-band, season guard, dynamic fan tiers, heat boost,
+        minimum off-time lockout, 20-min heartbeat resend, and backup heater logic.
+
+      set_ir_command(power, mode, fan, temp)
+        Single point of truth for sending IR. Updates module state, persists
+        ac_state.json, and calls ir_daikin.send(). Also manages the lockout
+        timer (starts on power-off) and boot IR temp tracking.
+
+      set_manual_override(duration_ms)  /  is_override_active()  /  clear_override()
+        Override management. A 1-hour override pauses schedule and smart-adjust
+        changes. Triggered by: web UI up/down buttons, cmd=set, cmd=up/down,
+        POST /api/ac. Cleared by the Resume Schedule button or override_clear command.
+
+      boot_resend()
+        Called once on startup. If Daikin was ON at last shutdown, re-sends the
+        saved IR state so the unit matches the ESP32's internal state.
+
+      check_sanity(current_temp, out_temp)
+        Maintains a 15-minute rolling temperature window. If both heaters are
+        commanded off, it's below 30°F outside, and room temp rose 2°F+ in that
+        window, sets a warning and sends emergency Pelonis off.
+
+      Daikin runaway detection: if ac_power=False but room rises above a scaled
+      threshold in 15 min with outdoor well below indoor, resends a stateful off
+      frame. 30-min cooldown. Threshold scales down as outdoor-indoor gap grows.
+
+  ir_daikin.py
+    Low-level Daikin ARC433 IR frame builder and transmitter.
+      - Builds a 19-byte stateful frame encoding power, mode, fan speed, and
+        temperature setpoint in one complete command
+      - Transmits at 38 kHz using PWM on GPIO 23
+      - Preamble: 5x 420µs mark/space bursts; header: 3500/1750µs; bits: 420µs
+        mark, 1300µs (1) or 430µs (0) space; LSB-first byte order
+      - repeat=3 used by ac_mgr for reliability (each frame is self-contained)
+      - Temperature encoding: 0x21–0x3A maps to 61–86°F (offset -28 from °F)
+      - Mode map: auto=0, dry=2, cool=3, heat=4, fan=6
+      - Fan map: auto=0xA, quiet=0xB, low=3, mid=4, high=5, turbo=7
+
+  sched_mgr.py
+    Schedule storage, retrieval, and evaluation. Schedule format (schedule.json):
+      {
+        "home_temp": 72.0,
+        "windows": [
+          { "type": "away",  "start": "07:15", "end": "17:00",
+            "days": ["mon","tue","wed","thu","fri"],
+            "heat_limit": 58, "cool_limit": 84, "pre": 30 },
+          { "type": "home",  "start": "06:00", "end": "07:15",
+            "days": ["mon","tue","wed","thu","fri"], "temp": 75 }
+        ]
+      }
+
+      get_scheduled_state(day, time_str) -> {temp, mode, away, heat_limit, cool_limit}
+        Evaluates all windows for the current moment. Away windows return away=True
+        (only protect limits) unless within the pre-conditioning window (final N
+        minutes before end), in which case they return home_temp with away=False.
+        Home windows return their target temp. No matching window returns home_temp.
+        Supports midnight-crossing windows. Handles legacy away_windows format migration.
+
+  state_mgr.py
+    Single-value persistence for target_temp. Reads/writes state.json.
+    Loaded once at startup; written every time target_temp changes (API or schedule).
+
+  data_mgr.py
+    5-minute sensor history logger. Writes to history.csv in compact format:
+      YYMMDDHHMI, temp*10, humidity*10, state_char, outdoor_temp*10
+    State characters: H=heating, C=cooling, A=away, I=idle, L=lockout.
+    Skips entries if NTP year < 2024 (clock not synced).
+    Trims file to 1000 lines when size exceeds 55 KB (reads line-by-line to
+    conserve RAM). Outdoor temp column is omitted if not available.
+
+  learn_mgr.py
+    Adaptive pre-conditioning optimizer. Runs daily at 21:00 via main.py.
+    Algorithm:
+      1. Reads the last ~4 hours of history.csv (line-by-line, bounded buffer)
+      2. For each away window active today, finds a heating episode in the
+         LOOKBACK_H hours before the window end
+      3. Measures °F/min rise during that episode (away→heat→idle pattern)
+      4. Stores the rate in learning.json (7-episode rolling window)
+      5. After MIN_EPISODES (3) days, averages the rates and calculates:
+           needed_minutes = (home_temp - heat_limit) / avg_rate * 1.15 buffer
+      6. Updates the window's pre-con value if change >= 5 minutes; saves schedule
+    Does nothing until enough data is collected. Safe to run even if no episode
+    was found today (just skips without modifying the schedule).
+
+  outdoor_mgr.py
+    Outdoor temperature fetcher using the Open-Meteo free API (no key required).
+    Caches the result for 30 minutes. Feeds the watchdog before and after the HTTP
+    call because DNS resolution and connection can take several seconds and would
+    otherwise trigger a WDT reset. Returns None on any failure. Location is
+    hardcoded to [YOUR CITY] (lat LON, lon LON).
+    get_temp(): refreshes cache when expired — call only from thermostat thread.
+    get_cached(): returns last cached value without triggering a fetch — used by
+      the web thread in _json_data() to avoid blocking the web server.
+
+  time_mgr.py
+    NTP time sync and local time helpers. Handles US Eastern time including DST:
+    spring forward on the 2nd Sunday of March at 07:00 UTC, fall back on the 1st
+    Sunday of November at 06:00 UTC. Offset is -5h (EST) or -4h (EDT).
+    sync_time(): calls ntptime.settime(); sets _synced = True on success.
+    is_synced(): returns True once NTP has succeeded at least once.
+    get_time_tuple(): returns time.localtime() adjusted for current offset.
+    get_local_time_string(): returns "HH:MM:SS" string for the web UI.
+    The thermostat thread retries sync_time() every 5 minutes until is_synced().
+
+  wifi_mgr.py
+    WiFi connection using DHCP (router has a MAC reservation for 192.168.x.x).
+    Reads SSID and password from secrets.py. Returns the IP on success or None
+    on failure. main.py reboots after 30 seconds if WiFi fails at boot.
+    ensure_connected(): checks wlan.isconnected() and calls connect() if WiFi has
+      dropped mid-run. Called by the thermostat thread every 5 minutes.
+
+  web_ui.py
+    Minimal runtime helper for the web page. Generates a small JavaScript
+    variable-initialization block injected between _web_p1.html and _web_p2.html
+    on every page load. Contains current target temp, AC mode/fan/power, and
+    initializes schedule/history/UI state variables. Kept separate so the large
+    HTML files are static (static files don't cause memory panics at boot).
+
+  _web_p1.html
+    First half of the single-page web app: all HTML structure and CSS styles.
+    Contains: header, tab bar, Dashboard page (sensor tiles, target temp +/-,
+    status badges, away/override cards, heater warning banner), AC Control page
+    (power, mode, fan, temp setpoint, Send IR button, Pelonis control),
+    Schedule page (container filled by JS), History page (canvas chart, stats
+    tiles, log viewer). Served in 2 KB chunks via HTTP.
+
+  _web_p2.html
+    Second half of the web app: all JavaScript. Key functions:
+      fetchData()          Polls /api/data every 5s and calls updateUI()
+      updateUI(d)          Renders all live values, badges, cards, warning banner
+      adjTemp(delta)       Up/down button handler with 700ms debounce; after
+                           settling, calls sendTempCmd() once with final value
+      sendTempCmd(val)     Posts cmd=set to /api/command; shows toast
+                           "Target XX.X° — override active 1h"
+      sendACCommand()      Posts full IR command to /api/ac (AC Control page)
+      clearOverride()      Posts override_clear; refreshes UI
+      loadHistory()        Fetches history.csv; parses and draws canvas chart
+      drawHistory()        Canvas chart: indoor/outdoor/humidity lines + heating/
+                           cooling background strips; adaptive X-axis labels
+      loadSchedule()       Fetches schedule JSON; calls renderSchedule()
+      renderSchedule()     Renders home-temp selector + Calendar/List toggle +
+                           dispatches to renderCalView() or list editor
+      renderCalView()      7-row Gantt chart: away (red), home (green), pre-con
+                           (orange) segments; today marker + current-time line
+      setSchedView(m)      Switches schedViewMode between 'cal' and 'list'
+      saveSchedule()       Posts schedule JSON back to device
+      setHeater(on)        Posts to /api/heater/on or /api/heater/off
+
+  secrets.py
+    WiFi credentials (not in version control). Format:
+      WIFI = {'ssid': 'your_ssid', 'password': 'your_password'}
+
+
+--------------------------------------------------------------------------------
+  FILE SUMMARY — PC-SIDE TOOLS (run on the development machine)
+--------------------------------------------------------------------------------
+
+  remote.py
+    Primary deployment tool. Wraps webrepl_cli.py for wireless file transfer.
+    Commands:
+      python3 remote.py deploy
+        Uploads all DEFAULT_FILES in safe order (main.py last so the thermostat
+        keeps running during upload), then reboots the device via /api/reboot.
+      python3 remote.py upload file.py [file2.py ...]
+        Upload specific files only.
+      python3 remote.py reboot
+        HTTP POST to /api/reboot.
+      python3 remote.py settemp 74
+        Sets target temperature via /api/command?cmd=set.
+    DEFAULT_FILES includes all device Python modules and both HTML files.
+    WebREPL connection: ws://192.168.x.x:8266, password: thermo.
+
+  webrepl_cli.py
+    MicroPython project WebREPL client (not authored here). Used by remote.py
+    to PUT files to the ESP32 over WebSocket. Called directly for single-file
+    uploads:
+      python3 webrepl_cli.py -p thermo <local_file> 192.168.x.x:<remote_file>
+    Note: requires the device to be in a clean idle state. If a previous connection
+    attempt stalled or the device is mid-reboot, wait for the WDT to clear it
+    (up to 90 seconds) before retrying.
+
+  ir_angle_test.py
+    One-shot PC-side test tool for dialling in the IR LED pointing angle. Sends
+    alternating heater-off / heater-on commands via HTTP every 20 seconds so you
+    can listen for the Pelonis beep while physically adjusting the LED. Ctrl+C
+    sends a final off command. Not deployed to the device.
+
+  fetch_logs.py
+    Pulls logs and history from the device via HTTP and archives them locally.
+    Commands:
+      python3 fetch_logs.py              Fetch both system.log and history.csv
+      python3 fetch_logs.py --log        system.log only
+      python3 fetch_logs.py --hist       history.csv only
+      python3 fetch_logs.py --tail 50    Fetch log and print last 50 lines
+    Archives saved to ./logs/ as timestamped copies (nothing ever overwritten).
+    Also writes a "latest" copy at logs/system.log and logs/history.csv.
+
+
+--------------------------------------------------------------------------------
+  STARTUP SEQUENCE
+--------------------------------------------------------------------------------
+
+  1. boot.py     — WiFi connect → WebREPL start
+  2. main.py     — log_mgr.setup() (tee all print to flash)
+                 — load target_temp from state.json
+                 — wifi_mgr.connect() (confirms WiFi; reboots if failed)
+                 — WDT start (90s)
+                 — time_mgr.sync_time() (NTP)
+                 — socket bind on port 80
+                 — ac_mgr.boot_resend() (resync Daikin IR state)
+                 — _thread.start_new_thread(_thermostat_loop, ())
+                 — _web_loop_forever() begins on main thread
+
+
+--------------------------------------------------------------------------------
+  KNOWN CONSTRAINTS AND DESIGN DECISIONS
+--------------------------------------------------------------------------------
+
+  MicroPython RAM
+    Large string literals at module level cause C-level memory panics and boot
+    loops. The entire HTML+JS web app is split across two static files
+    (_web_p1.html, _web_p2.html) served in 2 KB chunks. Only the tiny dynamic
+    JS var block is built as a string at runtime (web_ui.py).
+
+  Threaded architecture and GIL safety
+    The ESP32 runs a thermostat thread and a web server thread in parallel via
+    _thread. MicroPython's GIL ensures that individual reads/writes to primitive
+    types (float, int, bool) are atomic. Compound updates (e.g., setting both
+    target_temp and ac_mode together) are not atomic, but in practice the
+    thermostat thread only acts on target_temp once per loop iteration (100ms
+    delay) and the effect of a momentary stale read is negligible.
+    IR sends use utime.sleep_us() for microsecond-level timing. Because sleep_us()
+    releases the GIL, the web server thread can wake mid-frame and corrupt timing.
+    All IR frame transmissions are wrapped in machine.disable_irq()/enable_irq() to
+    prevent preemption during the timing-critical bit-bang. IRQs are disabled only
+    for the ~10ms (Pelonis NEC) or ~230ms (Daikin ARC433) frame duration.
+    The web server handles one HTTP connection at a time (0.5s socket timeout).
+    _web_loop_forever() wraps the web loop in an outer BaseException recovery
+    loop — if the web loop crashes for any reason it restarts within 1 second.
+
+  IR protocol constraints
+    Daikin: each frame is fully self-contained (stateful), so repeat=3 is safe and
+    improves reliability. Pelonis: POWER is a toggle, so repeat=1 is mandatory —
+    odd repeats turn on, even repeats cancel out. Three repeats = three toggles
+    = net no change with brief flicker. This caused confusing behavior until
+    the root cause was identified.
+
+  Resistor value matters
+    The IR LED circuit originally used a 330Ω resistor (misread as 33Ω from a
+    kit). This reduced LED current and IR range to near zero. Replacing with 22Ω
+    and adding a second LED in parallel restored full-room range.
+
+  WebREPL timing
+    WebREPL (port 8266) must be called when the device is stable and not mid-reboot.
+    If a WDT reset is in progress or an OTA upload left the socket in a bad state,
+    the WebREPL handshake will hang. Wait up to 60 seconds for the WDT cycle to
+    complete, confirm the HTTP API responds, then retry.
+
+  Daikin auto mode
+    The Daikin's built-in "auto" mode is unreliable. The thermostat uses its own
+    heat/cool decision logic and always sends explicit "heat" or "cool" commands.
+
+================================================================================

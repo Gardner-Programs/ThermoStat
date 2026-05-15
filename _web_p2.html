@@ -1,0 +1,618 @@
+
+function goTab(id,el){
+  document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active');});
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active');});
+  document.getElementById(id).classList.add('active');
+  el.classList.add('active');
+  try{localStorage.setItem('activeTab',id);}catch(e){}
+  if(id==='sched')loadSchedule();
+  if(id==='data'){loadHistory();loadLog();}
+}
+function toast(msg,dur){
+  dur=dur||2500;
+  var t=document.getElementById('toast');
+  t.innerHTML=msg;
+  t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show');},dur);
+}
+function syncPowerBtns(on){
+  var a=document.getElementById('pow-on'),b=document.getElementById('pow-off');
+  if(!a||!b)return;
+  a.style.opacity=on?'1':'0.4';
+  b.style.opacity=on?'0.4':'1';
+}
+function updateUI(d){
+  if(!d)return;
+  document.getElementById('dTemp').innerHTML=d.temp.toFixed(1)+'<span class="unit"> &deg;F</span>';
+  document.getElementById('dHum').innerHTML=d.hum.toFixed(1)+'<span class="unit"> %</span>';
+  var outEl=document.getElementById('dOut');
+  if(outEl)outEl.innerHTML=(d.out!=null?d.out.toFixed(1):'--')+'<span class="unit"> &deg;F</span>';
+  document.getElementById('dTarget').innerHTML=d.target.toFixed(1)+'<span class="unit">&deg;</span>';
+  if(d.time){var tp=d.time.split(':'),th=parseInt(tp[0],10);document.getElementById('timeDisp').textContent=(th%12||12)+':'+tp[1]+(th>=12?' PM':' AM');nowTimeMins=th*60+(parseInt(tp[1],10)||0);}
+  var s=(d.state||'IDLE').toUpperCase();
+  var sc='#888';
+  if(s.indexOf('COOL')>=0)sc='#00BFFF';
+  else if(s.indexOf('HEAT')>=0)sc='#FF6B35';
+  else if(s.indexOf('FAN')>=0)sc='#32CD32';
+  else if(s==='AWAY')sc='#FFD700';
+  else if(s==='LOCKOUT')sc='#FF8C00';
+  var b=document.getElementById('stateBadge');
+  b.textContent=s;
+  b.style.cssText='background:'+sc+'1a;color:'+sc+';border:1px solid '+sc;
+  var pw=document.getElementById('dPower');
+  if(d.power!==undefined){
+    pw.textContent=d.power?'ON':'OFF';
+    pw.style.color=d.power?'#27ae60':'#666';
+    if(!ctrlDirty){curPower=d.power;syncPowerBtns(d.power);}
+  }
+  if(d.mode){
+    document.getElementById('dModeInfo').textContent=d.mode.toUpperCase()+' / '+(d.fan||'').toUpperCase();
+    if(!ctrlDirty){
+      curMode=d.mode;curFan=d.fan||curFan;curPower=d.power!==undefined?d.power:curPower;
+      document.querySelectorAll('.mode-grid .sel-btn').forEach(function(b){b.classList.remove('active');});
+      var mb=document.getElementById('m-'+d.mode);if(mb)mb.classList.add('active');
+      document.querySelectorAll('.fan-grid .sel-btn').forEach(function(b){b.classList.remove('active');});
+      var fb=document.getElementById('f-'+(d.fan||'auto'));if(fb)fb.classList.add('active');
+    }
+  }
+  if(!editingTemp){
+    curTarget=d.target;
+    var disp=d.target.toFixed(1)+'\u00b0';
+    document.getElementById('targetDisp').textContent=disp;
+    document.getElementById('ctrlTargetDisp').textContent=disp;
+  }
+  var awayCard=document.getElementById('away-card');
+  if(awayCard){
+    if(d.away){
+      awayCard.style.display='block';
+      var lim=document.getElementById('away-limits');
+      if(lim)lim.textContent='Protecting '+(d.hl||58)+'\u00b0\u2013'+(d.cl||84)+'\u00b0F';
+    } else {
+      awayCard.style.display='none';
+    }
+  }
+  document.querySelectorAll('.ovr-card').forEach(function(c){c.style.display=d.override?'block':'none';});
+function fetchData(){
+  fetch('/api/data').then(function(r){return r.json();}).then(updateUI).catch(function(){});
+}
+function adjTemp(delta){
+  editingTemp=true;
+  curTarget=Math.round((curTarget+delta)*10)/10;
+  var disp=curTarget.toFixed(1)+'\u00b0';
+  document.getElementById('targetDisp').textContent=disp;
+  document.getElementById('ctrlTargetDisp').textContent=disp;
+  clearTimeout(tempTimer);
+  tempTimer=setTimeout(function(){sendTempCmd(curTarget);},700);
+}
+function sendTempCmd(val){
+  fetch('/api/command?cmd=set&val='+val)
+    .then(function(r){return r.json();})
+    .then(function(d){editingTemp=false;updateUI(d);toast('Target '+val.toFixed(1)+'\u00b0 \u2014 override active 1h');})
+    .catch(function(){editingTemp=false;toast('Connection error');});
+}
+function setMode(m){
+  ctrlDirty=true;curMode=m;
+  document.querySelectorAll('.mode-grid .sel-btn').forEach(function(b){b.classList.remove('active');});
+  var el=document.getElementById('m-'+m);if(el)el.classList.add('active');
+}
+function setFan(f){
+  ctrlDirty=true;curFan=f;
+  document.querySelectorAll('.fan-grid .sel-btn').forEach(function(b){b.classList.remove('active');});
+  var el=document.getElementById('f-'+f);if(el)el.classList.add('active');
+}
+function setPower(on){
+  ctrlDirty=true;curPower=on;
+  syncPowerBtns(on);
+  toast(on?'&#9646;&#9646; Power ON selected':'&#9632; Power OFF selected');
+}
+function initButtons(){setMode(curMode);setFan(curFan);syncPowerBtns(curPower);}
+function sendACCommand(){
+  var body=JSON.stringify({power:curPower,mode:curMode,fan:curFan,temp:curTarget});
+  fetch('/api/ac',{method:'POST',body:body})
+    .then(function(r){
+      if(r.ok){
+        ctrlDirty=false;
+        try{localStorage.setItem('acCtrl',JSON.stringify({mode:curMode,fan:curFan,power:curPower}));}catch(e){}
+        toast('&#9889; IR command sent! Override active 1h');fetchData();
+      }
+      else toast('Command failed ('+r.status+')');
+    })
+    .catch(function(){toast('Connection error');});
+}
+function clearOverride(){
+  fetch('/api/command?cmd=override_clear')
+    .then(function(r){return r.json();})
+    .then(function(d){toast('&#10003; Schedule resumed');updateUI(d);})
+    .catch(function(){toast('Connection error');});
+}
+
+// ---------------------------------------------------------------------------
+// History / graph
+// ---------------------------------------------------------------------------
+var customHours=48,customT0=null,customT1=null;
+function _applyCustomHours(n){
+  customHours=Math.max(1,Math.min(720,n));
+  var d=document.getElementById('customHrsDisp');
+  if(d)d.value=customHours;
+  customT1=Date.now();customT0=customT1-customHours*3600000;
+  try{localStorage.setItem('customHours',customHours);}catch(e){}
+  var sp=document.getElementById('statsPeriod');
+  if(sp)sp.textContent='Custom Stats';
+  drawHistory();updateHistStats();
+}
+function adjCustomHours(delta){_applyCustomHours(customHours+delta);}
+function setHistView(v){
+  histView=v;
+  try{localStorage.setItem('histView',v);}catch(e){}
+  ['v6h','v12h','v24h','v7d','vcustom'].forEach(function(id){
+    var el=document.getElementById(id);if(el)el.classList.toggle('active',id==='v'+v);
+  });
+  var cd=document.getElementById('customRangeDiv');
+  if(cd)cd.style.display=(v==='custom')?'flex':'none';
+  if(v==='custom'){
+    customT1=Date.now();customT0=customT1-customHours*3600000;
+    var sp=document.getElementById('statsPeriod');
+    if(sp)sp.textContent='Custom Stats';
+    drawHistory();updateHistStats();
+    return;
+  }
+  var sp=document.getElementById('statsPeriod');
+  var lmap={'6h':'6h','12h':'12h','24h':'24h','7d':'7-Day'};
+  if(sp)sp.textContent=(lmap[v]||v)+' Stats';
+  drawHistory();
+  updateHistStats();
+}
+function loadHistory(){
+  fetch('/api/history')
+    .then(function(r){return r.text();})
+    .then(function(txt){
+      histData=parseHist(txt);
+      drawHistory();
+      updateHistStats();
+    })
+    .catch(function(){toast('History unavailable');});
+}
+function parseHist(txt){
+  var lines=txt.trim().split('\n');
+  var out=[];
+  for(var i=0;i<lines.length;i++){
+    var p=lines[i].split(',');
+    if(p.length<4)continue;
+    var s=p[0];
+    if(s.length<10)continue;
+    var ts=new Date(2000+parseInt(s.slice(0,2)),parseInt(s.slice(2,4))-1,
+                    parseInt(s.slice(4,6)),parseInt(s.slice(6,8)),
+                    parseInt(s.slice(8,10))).getTime();
+    if(ts>Date.now()||ts<Date.now()-40*86400000)continue; // skip NTP-bad timestamps
+    var ot=p.length>4&&p[4].trim()?parseInt(p[4])/10:null;
+    out.push([ts,parseInt(p[1])/10,parseInt(p[2])/10,(p[3]||'I').trim(),ot]);
+  }
+  return out;
+}
+function filtHist(){
+  if(histView==='custom'){
+    if(!customT0||!customT1)return[];
+    return histData.filter(function(d){return d[0]>=customT0&&d[0]<=customT1;});
+  }
+  if(histView==='24h'){
+    var mn=new Date();mn.setHours(0,0,0,0);
+    return histData.filter(function(d){return d[0]>=mn.getTime();});
+  }
+  var ms={'6h':21600000,'12h':43200000,'7d':604800000};
+  var cutoff=Date.now()-(ms[histView]||21600000);
+  return histData.filter(function(d){return d[0]>=cutoff;});
+}
+function drawHistory(){
+  var cv=document.getElementById('histCanvas');
+  if(!cv)return;
+  var W=cv.parentElement.clientWidth-32;
+  if(W<100)W=300;
+  var H=185;
+  cv.width=W; cv.height=H;
+  var ctx=cv.getContext('2d');
+  var data=filtHist();
+  var PL=38,PR=8,PT=8,PB=24;
+  var gW=W-PL-PR,gH=H-PT-PB;
+  ctx.clearRect(0,0,W,H);
+  if(data.length<2){
+    ctx.fillStyle='#444';ctx.font='12px sans-serif';ctx.textAlign='center';
+    ctx.fillText('No data yet — check back in 5 minutes',W/2,H/2);
+    return;
+  }
+  var t0,t1;
+  if(histView==='custom'){t0=customT0;t1=customT1;}
+  else if(histView==='24h'){var mn=new Date();mn.setHours(0,0,0,0);t0=mn.getTime();t1=t0+86400000;}
+  else{var ms={'6h':21600000,'12h':43200000,'7d':604800000};t0=Date.now()-(ms[histView]||21600000);t1=Date.now();}
+  var tSpan=t1-t0;
+  var temps=data.filter(function(d){return d[1]>0;}).map(function(d){return d[1];});
+  var outTemps=data.filter(function(d){return d[4]!==null;}).map(function(d){return d[4];});
+  var allTemps=(temps.length?temps:[]).concat(outTemps.length?outTemps:[]);
+  if(!allTemps.length)allTemps=[60,80];
+  var tMin=Math.floor(Math.min.apply(null,allTemps)-10);
+  var tMax=Math.ceil(Math.max.apply(null,allTemps)+10);
+  var tRng=tMax-tMin||1;
+  function xp(ts){return PL+(ts-t0)/tSpan*gW;}
+  function yp(t){return PT+(1-(t-tMin)/tRng)*gH;}
+  // State background strips
+  var sc={H:'#FF6B3520',C:'#00BFFF1a',A:'#FFD70015',L:'#FF8C0015'};
+  for(var i=0;i<data.length-1;i++){
+    var col=sc[data[i][3]];
+    if(col){ctx.fillStyle=col;ctx.fillRect(xp(data[i][0]),PT,xp(data[i+1][0])-xp(data[i][0]),gH);}
+  }
+  // Y-axis grid + labels
+  var tStep=Math.max(1,Math.ceil(tRng/5));
+  ctx.font='10px sans-serif';ctx.textAlign='right';
+  for(var t=Math.ceil(tMin/tStep)*tStep;t<=tMax;t+=tStep){
+    var y=yp(t);
+    ctx.strokeStyle='#222';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(PL,y);ctx.lineTo(W-PR,y);ctx.stroke();
+    ctx.fillStyle='#555';ctx.fillText(t+'\u00b0',PL-3,y+3);
+  }
+  // X-axis grid + labels — snapped to real time boundaries, adaptive interval
+  ctx.textAlign='center';
+  var xMarks=[];
+  if(histView!=='7d'){
+    // 6h/12h: hourly; others: adaptive to keep ~6-8 marks
+    var ivMs=(histView==='6h'||histView==='12h')?3600000:tSpan<=21600000?1800000:tSpan<=43200000?3600000:tSpan<=86400000?7200000:tSpan<=172800000?21600000:43200000;
+    var d0=new Date(t0);
+    var ivMins=ivMs/60000;
+    var snapMins=Math.ceil((d0.getHours()*60+d0.getMinutes())/ivMins)*ivMins;
+    var mark=new Date(d0.getFullYear(),d0.getMonth(),d0.getDate(),0,snapMins,0).getTime();
+    while(mark<=t1){if(mark>=t0)xMarks.push(mark);mark+=ivMs;}
+  } else {
+    // Midnight of each day within the range
+    var d0=new Date(t0);
+    var mark=new Date(d0.getFullYear(),d0.getMonth(),d0.getDate()+1,0,0,0).getTime();
+    while(mark<=t1){xMarks.push(mark);mark+=86400000;}
+  }
+  // Fallback: data span too short for any boundary — use 3 evenly-spaced marks
+  if(xMarks.length<1){for(var k=1;k<4;k++)xMarks.push(t0+tSpan*k/4);}
+  for(var j=0;j<xMarks.length;j++){
+    var xv=xp(xMarks[j]);var dv=new Date(xMarks[j]);
+    var lbl;
+    if(histView==='7d'){lbl=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dv.getDay()];}
+    else if(tSpan>86400000){
+      // Long span: day name at midnight, short time otherwise — avoids crowding
+      var h=dv.getHours(),ap=h>=12?'PM':'AM',hr=h%12||12;
+      lbl=h===0?['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dv.getDay()]:hr+ap;
+    }
+    else{var h=dv.getHours(),m=dv.getMinutes(),ap=h>=12?'PM':'AM',hr=h%12||12;lbl=m===0?hr+ap:hr+':'+('0'+m).slice(-2)+ap;}
+    ctx.strokeStyle='#1a1a1a';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(xv,PT);ctx.lineTo(xv,PT+gH);ctx.stroke();
+    ctx.fillStyle='#555';ctx.fillText(lbl,xv,H-5);
+  }
+  // Outdoor temp line (dashed amber) — only if data exists
+  var hasOut=data.some(function(d){return d[4]!==null;});
+  if(hasOut){
+    ctx.strokeStyle='#FF7043';ctx.lineWidth=2;ctx.setLineDash([6,4]);
+    ctx.beginPath();var first=true;
+    for(var i=0;i<data.length;i++){
+      if(data[i][4]===null)continue;
+      var ox=xp(data[i][0]),oy=yp(data[i][4]);
+      if(first){ctx.moveTo(ox,oy);first=false;}else ctx.lineTo(ox,oy);
+    }
+    ctx.stroke();ctx.setLineDash([]);
+  }
+  // Humidity dashed line — skip outdoor-only entries (hum==0)
+  ctx.strokeStyle='#69FF47';ctx.lineWidth=1.5;ctx.setLineDash([3,5]);
+  ctx.beginPath();var hFirst=true;
+  for(var i=0;i<data.length;i++){
+    if(data[i][2]===0)continue;
+    var hx=xp(data[i][0]),hy=PT+(1-data[i][2]/100)*gH;
+    if(hFirst){ctx.moveTo(hx,hy);hFirst=false;}else ctx.lineTo(hx,hy);
+  }
+  ctx.stroke();ctx.setLineDash([]);
+  // Temperature line — skip outdoor-only entries (temp==0)
+  ctx.strokeStyle='#00BFFF';ctx.lineWidth=2;
+  ctx.beginPath();var tFirst=true;
+  for(var i=0;i<data.length;i++){
+    if(data[i][1]===0)continue;
+    var px=xp(data[i][0]),py=yp(data[i][1]);
+    if(tFirst){ctx.moveTo(px,py);tFirst=false;}else ctx.lineTo(px,py);
+  }
+  ctx.stroke();
+  // Latest value label
+  var last=data[data.length-1];
+  ctx.fillStyle='#00BFFF';ctx.font='bold 11px sans-serif';ctx.textAlign='right';
+  ctx.fillText(last[1].toFixed(1)+'\u00b0F',W-PR-2,PT+13);
+}
+function loadLog(){
+  fetch('/api/log')
+    .then(function(r){return r.text();})
+    .then(function(txt){
+      var box=document.getElementById('logBox');
+      if(box){box.textContent=txt||'(empty)';box.scrollTop=box.scrollHeight;}
+    })
+    .catch(function(){toast('Log unavailable');});
+}
+function clearLog(){
+  if(!confirm('Clear system log?'))return;
+  fetch('/api/log/clear',{method:'POST'})
+    .then(function(){
+      var box=document.getElementById('logBox');
+      if(box)box.textContent='(cleared)';
+      toast('Log cleared');
+    })
+    .catch(function(){toast('Clear failed');});
+}
+function updateHistStats(){
+  var data=filtHist();
+  function setEl(id,html){var e=document.getElementById(id);if(e)e.innerHTML=html;}
+  if(!data.length){
+    setEl('hMinT','--<span class="unit">\u00b0</span>');
+    setEl('hMaxT','--<span class="unit">\u00b0</span>');
+    setEl('hAvgT','--<span class="unit">\u00b0</span>');
+    setEl('hAvgH','--<span class="unit">%</span>');
+    return;
+  }
+  var temps=data.map(function(d){return d[1];});
+  var hums=data.map(function(d){return d[2];});
+  var sum=function(a){return a.reduce(function(x,y){return x+y;},0);};
+  var u='<span class="unit">';
+  setEl('hMinT',Math.min.apply(null,temps).toFixed(1)+u+'\u00b0</span>');
+  setEl('hMaxT',Math.max.apply(null,temps).toFixed(1)+u+'\u00b0</span>');
+  setEl('hAvgT',(sum(temps)/temps.length).toFixed(1)+u+'\u00b0</span>');
+  setEl('hAvgH',(sum(hums)/hums.length).toFixed(1)+u+'%</span>');
+}
+
+// ---------------------------------------------------------------------------
+// Schedule dropdown helpers
+// ---------------------------------------------------------------------------
+function mkTimeOpts(sel){
+  var o='',h,m,v,hr,ap;
+  for(h=0;h<24;h++){
+    for(m=0;m<60;m+=15){
+      v=('0'+h).slice(-2)+':'+('0'+m).slice(-2);
+      hr=h%12||12; ap=h<12?'AM':'PM';
+      o+='<option value="'+v+'"'+(v===sel?' selected':'')+'>'+('0'+hr).slice(-2)+':'+('0'+m).slice(-2)+' '+ap+'</option>';
+    }
+  }
+  return o;
+}
+function mkTempOpts(sel){
+  var o='',t;
+  for(t=61;t<=90;t++)
+    o+='<option value="'+t+'"'+(t===Math.round(sel)?' selected':'')+'>'+t+'\u00b0F</option>';
+  return o;
+}
+function mkHeatLimOpts(sel){
+  var o='',t;
+  for(t=45;t<=72;t++)
+    o+='<option value="'+t+'"'+(t===Math.round(sel)?' selected':'')+'>'+t+'\u00b0F</option>';
+  return o;
+}
+function mkCoolLimOpts(sel){
+  var o='',t;
+  for(t=76;t<=99;t++)
+    o+='<option value="'+t+'"'+(t===Math.round(sel)?' selected':'')+'>'+t+'\u00b0F</option>';
+  return o;
+}
+function mkPreOpts(sel){
+  var vals=[0,15,30,45,60,90,120];
+  var lbls=['None','15 min','30 min','45 min','1 hour','1.5 hrs','2 hours'];
+  var o='';
+  for(var i=0;i<vals.length;i++)
+    o+='<option value="'+vals[i]+'"'+(vals[i]===sel?' selected':'')+'>'+lbls[i]+'</option>';
+  return o;
+}
+
+// ---------------------------------------------------------------------------
+// Schedule
+// ---------------------------------------------------------------------------
+var DK=['mon','tue','wed','thu','fri','sat','sun'];
+var DL=['M','T','W','T','F','S','S'];
+var DLong=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+var schedViewMode='cal';
+var nowTimeMins=-1;
+function t2m(t){var p=(t||'0:0').split(':');return parseInt(p[0],10)*60+(parseInt(p[1],10)||0);}
+
+function loadSchedule(){
+  fetch('/api/schedule')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      schedData=(d&&typeof d==='object'&&'home_temp' in d)?d:{home_temp:72,windows:[]};
+      if(!schedData.windows)schedData.windows=[];
+      renderSchedule();
+    })
+    .catch(function(){toast('Could not load schedule');});
+}
+
+function renderSchedule(){
+  var ht=schedData.home_temp||72;
+  var html='';
+
+  // Home temp
+  html+='<div class="card-title" style="margin-bottom:4px">Home Target Temperature</div>';
+  html+='<div class="home-temp-row">';
+  html+='<select class="se-input se-sel-temp" style="font-size:1.1rem;padding:8px 28px 8px 10px" id="homeTempSel" onchange="updHomeTemp(this)">'+mkTempOpts(ht)+'</select>';
+  html+='<div class="se-lbl" style="margin-top:6px">Default when no window is active</div>';
+  html+='</div>';
+  html+='<div style="border-top:1px solid #2a2a2a;margin:12px 0 10px"></div>';
+
+  // View toggle
+  html+='<div class="stgl">';
+  html+='<button class="stgl-btn'+(schedViewMode==='cal'?' active':'')+'" onclick="setSchedView(\'cal\')">&#128197; Calendar</button>';
+  html+='<button class="stgl-btn'+(schedViewMode==='list'?' active':'')+'" onclick="setSchedView(\'list\')">&#9776; List / Edit</button>';
+  html+='</div>';
+
+  if(schedViewMode==='cal'){
+    html+=renderCalView();
+    html+='<button class="btn-add-away-entry" style="width:100%;margin-top:12px" onclick="setSchedView(\'list\')">&#9998;&nbsp; Edit Schedule</button>';
+  } else {
+    html+='<div class="card-title" style="margin-bottom:10px">Schedule Windows</div>';
+    var wins=schedData.windows;
+    if(!wins.length){
+      html+='<div style="color:var(--sub);font-size:.8rem;text-align:center;padding:10px 0 14px">No windows set — system runs at home temp 24/7.</div>';
+    }
+    for(var i=0;i<wins.length;i++){
+      var w=wins[i];
+      var isAway=(w.type||'away')==='away';
+      var days=w.days||[];
+      var db='';
+      for(var di=0;di<DK.length;di++){
+        var on=days.indexOf(DK[di])>=0;
+        db+='<button class="day-btn'+(on?' active':'')+'" data-idx="'+i+'" data-dk="'+DK[di]+'" onclick="toggleDay(this)">'+DL[di]+'</button>';
+      }
+      html+='<div class="sched-entry '+(isAway?'sched-away':'sched-home-exc')+'">';
+      html+='<div class="se-top">';
+      html+='<span class="'+(isAway?'away-tag':'home-exc-tag')+'">'+(isAway?'AWAY':'HOME')+'</span>';
+      html+='<select class="se-input se-sel-time" data-idx="'+i+'" data-field="start" onchange="updWin(this)">'+mkTimeOpts(w.start||'07:00')+'</select>';
+      html+='<span class="se-lbl">to</span>';
+      html+='<select class="se-input se-sel-time" data-idx="'+i+'" data-field="end" onchange="updWin(this)">'+mkTimeOpts(w.end||'17:00')+'</select>';
+      html+='<div style="flex:1"></div>';
+      html+='<button class="btn-del" data-idx="'+i+'" onclick="delWin(this)">&#10005;</button>';
+      html+='</div>';
+      html+='<div class="se-days">'+db+'</div>';
+      html+='<div class="se-top">';
+      if(isAway){
+        html+='<span class="se-lbl">heat&nbsp;below</span>';
+        html+='<select class="se-input se-sel-lim" data-idx="'+i+'" data-field="heat_limit" onchange="updWin(this)">'+mkHeatLimOpts(w.heat_limit!=null?w.heat_limit:58)+'</select>';
+        html+='<span class="se-lbl">cool&nbsp;above</span>';
+        html+='<select class="se-input se-sel-lim" data-idx="'+i+'" data-field="cool_limit" onchange="updWin(this)">'+mkCoolLimOpts(w.cool_limit!=null?w.cool_limit:84)+'</select>';
+        html+='<span class="se-lbl">pre-condition</span>';
+        html+='<select class="se-input se-sel-pre" data-idx="'+i+'" data-field="pre" onchange="updWin(this)">'+mkPreOpts(w.pre!=null?w.pre:0)+'</select>';
+      } else {
+        html+='<span class="se-lbl">target&nbsp;temp</span>';
+        html+='<select class="se-input se-sel-temp" data-idx="'+i+'" data-field="temp" onchange="updWin(this)">'+mkTempOpts(w.temp!=null?w.temp:72)+'</select>';
+      }
+      html+='</div>';
+      html+='</div>';
+    }
+    html+='<div class="sched-add-row" style="margin-top:10px">';
+    html+='<button class="btn-add-away-entry" onclick="addWin(\'away\')">&#9992; Add Away</button>';
+    html+='<button class="btn-add-home-exc-entry" onclick="addWin(\'home\')">&#9651; Add Home</button>';
+    html+='</div>';
+  }
+
+  document.getElementById('schedContainer').innerHTML=html;
+}
+
+function setSchedView(m){schedViewMode=m;renderSchedule();}
+
+function renderCalView(){
+  var M=1440;
+  var todayIdx=(new Date().getDay()+6)%7;
+  var html='';
+
+  // Hour marks header
+  html+='<div class="cal-thdr"><div class="cal-tbar">';
+  var marks=[[0,'12a'],[2,'2a'],[4,'4a'],[6,'6a'],[8,'8a'],[10,'10a'],[12,'12p'],[14,'2p'],[16,'4p'],[18,'6p'],[20,'8p'],[22,'10p']];
+  for(var mi=0;mi<marks.length;mi++){
+    var mp=(marks[mi][0]*60/M*100).toFixed(1);
+    html+='<span class="cal-tl" style="left:'+mp+'%">'+marks[mi][1]+'</span>';
+  }
+  html+='</div></div>';
+
+  var wins=schedData.windows;
+  for(var di=0;di<7;di++){
+    var dk=DK[di];
+    var isToday=(di===todayIdx);
+    html+='<div class="cal-row">';
+    html+='<div class="cal-day'+(isToday?' today':'')+'">'+(isToday?'&#9654;':DLong[di].charAt(0)+DLong[di].charAt(1)+DLong[di].charAt(2))+'</div>';
+    html+='<div class="cal-bar">';
+
+    // Grid lines at 2h intervals
+    for(var g=1;g<=11;g++)
+      html+='<div class="cal-vline" style="left:'+(g/12*100).toFixed(2)+'%"></div>';
+
+    for(var wi=0;wi<wins.length;wi++){
+      var w=wins[wi];
+      if((w.days||[]).indexOf(dk)<0)continue;
+      var isAway=(w.type||'away')==='away';
+      var sm=t2m(w.start||'00:00');
+      var em=t2m(w.end||'23:59');
+      var cls=isAway?'cs-away':'cs-home';
+
+      // Handle midnight-crossing windows as two segments
+      var segs=(em>sm)?[[sm,em]]:[[sm,M],[0,em]];
+      for(var si=0;si<segs.length;si++){
+        var s0=segs[si][0],s1=segs[si][1];
+        var wmin=s1-s0;
+        var lbl=(wmin>=90)?(isAway?'AWAY':'HOME'):'';
+        var lp=(s0/M*100).toFixed(2),wp=(wmin/M*100).toFixed(2);
+        html+='<div class="cal-seg '+cls+'" style="left:'+lp+'%;width:'+wp+'%"><span class="cal-seg-txt">'+lbl+'</span></div>';
+      }
+
+      // Pre-conditioning overlay (orange tint over trailing portion of away window)
+      if(isAway&&w.pre>0&&em>sm){
+        var ps=em-parseInt(w.pre,10);
+        if(ps>=sm&&ps<em){
+          var pl=(ps/M*100).toFixed(2),pw=(parseInt(w.pre,10)/M*100).toFixed(2);
+          html+='<div class="cal-seg cs-pre" style="left:'+pl+'%;width:'+pw+'%"></div>';
+        }
+      }
+    }
+
+    // Current time marker on today's row
+    if(isToday&&nowTimeMins>=0)
+      html+='<div class="cal-now" style="left:'+(nowTimeMins/M*100).toFixed(2)+'%"></div>';
+
+    html+='</div></div>';
+  }
+
+  // Legend
+  html+='<div class="cal-legend">';
+  html+='<span style="color:#e74c3c99">&#9632; Away</span>';
+  html+='<span style="color:#27ae6099">&#9632; Home</span>';
+  html+='<span style="color:#e67e2299">&#9632; Pre-con</span>';
+  html+='<span style="color:var(--accent)">&#9646; Now</span>';
+  html+='</div>';
+
+  return html;
+}
+
+function updHomeTemp(el){
+  schedData.home_temp=parseFloat(el.value);
+}
+function updWin(el){
+  var idx=parseInt(el.getAttribute('data-idx'),10);
+  var field=el.getAttribute('data-field');
+  var nums=['heat_limit','cool_limit','pre','temp'];
+  schedData.windows[idx][field]=nums.indexOf(field)>=0?parseFloat(el.value):el.value;
+}
+function toggleDay(el){
+  var idx=parseInt(el.getAttribute('data-idx'),10);
+  var dk=el.getAttribute('data-dk');
+  var days=schedData.windows[idx].days||(schedData.windows[idx].days=[]);
+  var pos=days.indexOf(dk);
+  if(pos>=0)days.splice(pos,1);else days.push(dk);
+  el.classList.toggle('active');
+}
+function delWin(el){
+  schedData.windows.splice(parseInt(el.getAttribute('data-idx'),10),1);
+  renderSchedule();
+}
+function addWin(type){
+  if(type==='home'){
+    schedData.windows.push({type:'home',start:'06:00',end:'07:15',days:['mon','tue','wed','thu','fri'],temp:75});
+  } else {
+    schedData.windows.push({type:'away',start:'07:15',end:'17:00',days:['mon','tue','wed','thu','fri'],heat_limit:58,cool_limit:84,pre:30});
+  }
+  renderSchedule();
+}
+function saveSchedule(){
+  fetch('/api/schedule',{method:'POST',body:JSON.stringify(schedData)})
+    .then(function(r){toast(r.ok?'&#10003; Schedule saved!':'Save failed');})
+    .catch(function(){toast('Connection error');});
+}
+
+fetchData();
+initButtons();
+// Restore saved tab and history view
+try{
+  var _ch=parseInt(localStorage.getItem('customHours')||'48',10);
+  if(_ch>0){customHours=_ch;var _cd=document.getElementById('customHrsDisp');if(_cd)_cd.value=_ch;}
+  var _sv=localStorage.getItem('histView');
+  if(_sv){histView=_sv;}
+  var _st=localStorage.getItem('activeTab');
+  if(_st&&_st!=='dash'){
+    var _tabs=document.querySelectorAll('.tab');
+    for(var _i=0;_i<_tabs.length;_i++){
+      if(_tabs[_i].getAttribute('onclick').indexOf("'"+_st+"'")>=0){goTab(_st,_tabs[_i]);break;}
+    }
+  }
+}catch(e){}
+setInterval(fetchData,5000);
+</script>
+</body>
+</html>

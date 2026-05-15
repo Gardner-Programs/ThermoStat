@@ -1,0 +1,91 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Deploy and Run",
+            "type": "shell",
+            "command": "source .venv/bin/activate && mpremote exec \"import os; keep={'state.json','schedule.json','ac_state.json','history.csv','system.log','learning.json'}; [os.remove(f) for f in os.listdir() if f not in keep]\" && ls | grep -vE '(\\.dev|\\.venv|\\.vscode|deploy\\.sh|history\\.csv|system\\.log|learning\\.json)' | xargs -I {} mpremote cp {} :{} && mpremote run main.py",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Fetch Logs",
+            "type": "shell",
+            "command": "source .venv/bin/activate && python3 fetch_logs.py --tail 50",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Fetch History",
+            "type": "shell",
+            "command": "source .venv/bin/activate && python3 fetch_logs.py --hist",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Deploy (WiFi)",
+            "type": "shell",
+            "command": "source .venv/bin/activate && python3 remote.py deploy",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Upload File (WiFi)",
+            "type": "shell",
+            "command": "source .venv/bin/activate && python3 remote.py upload ${input:remoteFile}",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Reboot Device",
+            "type": "shell",
+            "command": "source .venv/bin/activate && python3 remote.py reboot",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Seed History",
+            "type": "shell",
+            "command": "source .venv/bin/activate && mpremote cp history.csv :history.csv && echo 'history.csv uploaded to device'",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "otaFile",
+            "type": "promptString",
+            "description": "Filename to upload (e.g. main.py or ac_mgr.py ir_pelonis.py)"
+        },
+        {
+            "id": "remoteFile",
+            "type": "promptString",
+            "description": "Filename to upload via WebREPL (e.g. ac_mgr.py)"
+        }
+    ]
+}

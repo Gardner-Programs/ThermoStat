@@ -1,0 +1,8 @@
+secrets.py
+.venv/
+logs/
+history.csv
+.claude/
+.dev/state.json
+__pycache__/
+*.pyc
