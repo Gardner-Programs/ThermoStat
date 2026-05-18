@@ -1,6 +1,24 @@
 # ThermoStat
 
-An ESP32-based smart thermostat built with MicroPython. Controls a Daikin mini-split AC and a backup Pelonis oil heater via IR, reads room temperature from a DHT22 sensor, and hosts a single-page web UI served directly from the ESP32.
+An ESP32-based smart thermostat built with MicroPython — **no cloud, no app, no subscription**. The ESP32 is the entire stack: thermostat brain, IR transmitter, web server, and database.
+
+Controls a Daikin mini-split AC and a backup Pelonis oil heater via IR, reads room temperature from a DHT22 sensor, and hosts a single-page web UI served directly from the microcontroller.
+
+---
+
+## What makes this interesting
+
+Most "smart thermostat" projects wire a microcontroller to a relay and call it done. This one handles the logic that commercial thermostats get wrong:
+
+**Reverse-engineered IR protocols.** The Daikin ARC433 remote sends a stateful 19-byte frame — every command includes the full AC state, not a diff. This project builds and transmits that frame directly from MicroPython, giving full control over mode, fan speed, and setpoint without the Daikin's unreliable built-in auto mode.
+
+**Adaptive learning.** The schedule supports pre-conditioning — start heating N minutes before you arrive home. The adaptive optimizer measures actual heating rate each day (how many minutes per degree °F) and adjusts the lead time automatically. It converges on the right value without manual tuning.
+
+**Served entirely from the ESP32.** The web app is a single-page React-style UI with a live dashboard, Gantt-style schedule editor, and canvas history chart — all served from the ESP32's flash over WiFi. The HTML/JS is split into 2 KB chunks to work around MicroPython's memory limits.
+
+**No USB needed after initial flash.** OTA updates use MicroPython's built-in WebREPL. `remote.py` deploys all changed files and reboots in one command. `fetch_logs.py` pulls logs locally for analysis.
+
+---
 
 ## Features
 
